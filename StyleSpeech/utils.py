@@ -51,6 +51,7 @@ def get_mask_from_lengths(lengths, max_len=None):
 
     ids = torch.arange(0, max_len).unsqueeze(0).expand(batch_size, -1).cuda()
     mask = (ids >= lengths.unsqueeze(1).expand(-1, max_len))
+    print("mask shape: ", mask.shape, ", lengths: ", lengths)
     return mask
 
 

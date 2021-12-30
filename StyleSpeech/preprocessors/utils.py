@@ -50,7 +50,10 @@ def remove_outlier(x, p_bottom: int = 25, p_top: int = 75):
 
     x[indices_of_outliers] = 0.0
     x[indices_of_outliers] = np.max(x)
-    return 
+    # return
+    # new!
+    return x
+
     
 def average_by_duration(x, durs):
     length = sum(durs)

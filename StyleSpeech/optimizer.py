@@ -12,12 +12,27 @@ class ScheduledOptim():
     def state_dict(self):
         return self._optimizer.state_dict()
 
-    def step(self):
-        self._optimizer.step()
+    # def step(self):
+    #     self._optimizer.step()
+    def step(self, scaler=None):
+        if scaler is None:
+            self._optimizer.step()
+        else:
+            scaler.step(self._optimizer)
 
-    def step_and_update_lr(self, step=None):
+    # New
+    def update_lr(self, step=None):
         self._update_learning_rate(step=step)
-        self._optimizer.step()
+
+    # def step_and_update_lr(self, step=None):
+    #     self._update_learning_rate(step=step)
+    #     self._optimizer.step()
+    def step_and_update_lr(self, step=None, scaler=None):
+        if scaler is None:
+            self._optimizer.step()
+        else:
+            scaler.step(self._optimizer)
+        self._update_learning_rate(step=step)
 
     def zero_grad(self):
         self._optimizer.zero_grad()

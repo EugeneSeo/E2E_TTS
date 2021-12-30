@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
-from models.Modules import LinearNorm, ConvNorm, get_sinusoid_encoding_table
-import utils
-
+# from models.Modules import LinearNorm, ConvNorm, get_sinusoid_encoding_table
+# import utils
+from utils import get_mask_from_lengths
+from StyleSpeech.models.Modules import LinearNorm, ConvNorm, get_sinusoid_encoding_table
+import StyleSpeech.utils as utils
 
 class VarianceAdaptor(nn.Module):
     """ Variance Adaptor """
@@ -31,7 +33,7 @@ class VarianceAdaptor(nn.Module):
         # Length regulator
         self.length_regulator = LengthRegulator(self.hidden_dim, config.max_seq_len)
     
-    def forward(self, x, src_mask, mel_len=None, mel_mask=None, 
+    def forward(self, device, x, src_mask, mel_len=None, mel_mask=None, 
                         duration_target=None, pitch_target=None, energy_target=None, max_len=None):
         # Duration
         log_duration_prediction = self.duration_predictor(x, src_mask)
@@ -53,13 +55,15 @@ class VarianceAdaptor(nn.Module):
 
         # Length regulate
         if duration_target is not None:
-            output, pe, mel_len = self.length_regulator(x, duration_target, max_len)
-            mel_mask = utils.get_mask_from_lengths(mel_len)
+            output, pe, mel_len = self.length_regulator(device, x, duration_target, max_len)
+            # mel_mask = utils.get_mask_from_lengths(mel_len)
+            mel_mask = get_mask_from_lengths(mel_len, device)
         else:
             duration_rounded = torch.clamp(torch.round(torch.exp(log_duration_prediction)-1.0), min=0)            
             duration_rounded = duration_rounded.masked_fill(src_mask, 0).long()
-            output, pe, mel_len = self.length_regulator(x, duration_rounded)
-            mel_mask = utils.get_mask_from_lengths(mel_len)
+            output, pe, mel_len = self.length_regulator(device, x, duration_rounded)
+            # mel_mask = utils.get_mask_from_lengths(mel_len)
+            mel_mask = get_mask_from_lengths(mel_len, device)
 
         # Phoneme-wise positional encoding
         output = output + pe
@@ -73,7 +77,7 @@ class LengthRegulator(nn.Module):
         self.position_enc = nn.Parameter(
             get_sinusoid_encoding_table(max_pos+1, hidden_size), requires_grad=False)
 
-    def LR(self, x, duration, max_len):
+    def LR(self, x, duration, max_len, device):
         output = list()
         position = list()
         mel_len = list()
@@ -89,7 +93,7 @@ class LengthRegulator(nn.Module):
         else:
             output = utils.pad(output)
             position = utils.pad(position)
-        return output, position, torch.LongTensor(mel_len).cuda()
+        return output, position, torch.LongTensor(mel_len).to(device)
 
     def expand(self, batch, predicted):
         out = list()
@@ -102,8 +106,8 @@ class LengthRegulator(nn.Module):
         pos = torch.cat(pos, 0)
         return out, pos
 
-    def forward(self, x, duration, max_len=None):
-        output, position, mel_len = self.LR(x, duration, max_len)
+    def forward(self, device, x, duration, max_len=None):
+        output, position, mel_len = self.LR(x, duration, max_len, device)
         return output, position, mel_len
         
 
