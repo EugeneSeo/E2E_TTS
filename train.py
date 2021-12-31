@@ -31,37 +31,28 @@ torch.backends.cudnn.enabled = True
 from model import D_step, G_step, SS_step, parse_batch
 from dataloader import prepare_dataloader
 from torch.cuda.amp import autocast, GradScaler
+from utils import plot_data
 #--------------------------------------------------------------------#
 
 def train(rank, a, h, c, gpu_ids):
-    # # if h.num_gpus > 1:
-    # if len(gpu_ids) > 1:
-    #     init_process_group(backend=h.dist_config['dist_backend'], init_method=h.dist_config['dist_url'],
-    #                        world_size=h.dist_config['world_size'] * h.num_gpus, rank=rank)
-
     # torch.cuda.manual_seed(h.seed)
-    # device = torch.device('cuda:{:d}'.format(rank))
     device = torch.device('cuda:{:d}'.format(gpu_ids[0]))
-
-    # Added ------------------------------------------------------ #
-    print("Defining the Model")
-    # model = E2E_TTS(h, c, device).to(device)
-    # model = torch.nn.DataParallel(model, gpu_ids)
-
+    
+    # Define model
     generator = Generator(h).to(device)
     stylespeech = StyleSpeech(c).to(device)
     mpd = MultiPeriodDiscriminator().to(device)
     msd = MultiScaleDiscriminator().to(device)
+    loss_ss = StyleSpeechLoss()
 
-    generator = torch.nn.DataParallel(generator, gpu_ids)
-    # stylespeech = torch.nn.DataParallel(stylespeech, gpu_ids)
-    mpd = torch.nn.DataParallel(mpd, gpu_ids)
-    msd = torch.nn.DataParallel(msd, gpu_ids)
+    # generator = torch.nn.DataParallel(generator, gpu_ids)
+    # # stylespeech = torch.nn.DataParallel(stylespeech, gpu_ids)
+    # mpd = torch.nn.DataParallel(mpd, gpu_ids)
+    # msd = torch.nn.DataParallel(msd, gpu_ids)
+    
+    num_param = utils_ss.get_param_num(generator) + utils_ss.get_param_num(stylespeech) \
+                + utils_ss.get_param_num(msd) + utils_ss.get_param_num(mpd)
     print("Model Defined\n")
-    # -------------------------------------------------------------- #
-    # generator = Generator(h).to(device)
-    # mpd = MultiPeriodDiscriminator().to(device)
-    # msd = MultiScaleDiscriminator().to(device)
 
     if rank == 0:
         # print(generator)
@@ -91,30 +82,20 @@ def train(rank, a, h, c, gpu_ids):
         generator.load_state_dict(state_dict_g['generator'])
         mpd.load_state_dict(state_dict_do['mpd'])
         msd.load_state_dict(state_dict_do['msd'])
-        steps = state_dict_do['steps'] + 1
+        # steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
 
-    # # if h.num_gpus > 1:
-    # if len(gpu_ids) > 1:
-    #     # model.generator = DistributedDataParallel(model.generator, device_ids=gpu_ids).to(device)
-    #     # trainer.mpd = DistributedDataParallel(trainer.mpd, device_ids=gpu_ids).to(device)
-    #     # trainer.msd = DistributedDataParallel(trainer.msd, device_ids=gpu_ids).to(device)
-    #     model = DistributedDataParallel(model, device_ids=[gpu_ids[0]]).to(device)
-    #     trainer = DistributedDataParallel(trainer, device_ids=[gpu_ids[0]]).to(device)
+        generator = torch.nn.DataParallel(generator, gpu_ids)
+        # stylespeech = torch.nn.DataParallel(stylespeech, gpu_ids)
+        mpd = torch.nn.DataParallel(mpd, gpu_ids)
+        msd = torch.nn.DataParallel(msd, gpu_ids)
 
-    print("Defining Optimizer and Loss Function")
-    # Add ss's optimizer - done
-    # optim_g = torch.optim.AdamW(model.generator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
-    # optim_d = torch.optim.AdamW(itertools.chain(trainer.msd.parameters(), trainer.mpd.parameters()),
-    #                             h.learning_rate, betas=[h.adam_b1, h.adam_b2])
+    # Optimizers
     optim_g = torch.optim.AdamW(generator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
     optim_d = torch.optim.AdamW(itertools.chain(msd.parameters(), mpd.parameters()),
                                 h.learning_rate, betas=[h.adam_b1, h.adam_b2])
-    # Added ------------------------------------------------------ #
     optim_ss = torch.optim.Adam(stylespeech.parameters(), betas=c.betas, eps=c.eps)
-    loss_ss = StyleSpeechLoss()
     print("Optimizer and Loss Function Defined.")
-    # -------------------------------------------------------------- #
 
     if state_dict_do is not None:
         optim_g.load_state_dict(state_dict_do['optim_g'])
@@ -123,13 +104,20 @@ def train(rank, a, h, c, gpu_ids):
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
-    # Added & Changed ------------------------------------------------------ #
     scheduled_optim = ScheduledOptim(optim_ss, c.decoder_hidden, c.n_warm_up_step, steps)
 
     train_loader = prepare_dataloader(a.data_path, "train.txt", shuffle=True, batch_size=c.batch_size) 
     if rank == 0:        
         validation_loader = prepare_dataloader(a.data_path, "val.txt", shuffle=True, batch_size=c.batch_size) 
-        sw = SummaryWriter(os.path.join(a.checkpoint_path, 'logs'))
+        sw = SummaryWriter(os.path.join(a.save_path, 'logs'))
+        # Init logger
+        log_path = os.path.join(a.save_path, 'log.txt')
+        with open(log_path, "a") as f_log:
+            f_log.write("Dataset :{}\n Number of Parameters: {}\n".format(c.dataset, num_param))
+
+    # Init synthesis directory
+    synth_path = os.path.join(a.save_path, 'synth')
+    os.makedirs(synth_path, exist_ok=True)
 
     print("Data Loader is Prepared.")
     # model.train()
@@ -147,54 +135,35 @@ def train(rank, a, h, c, gpu_ids):
             start = time.time()
             print("Epoch: {}".format(epoch+1))
 
-        # if h.num_gpus > 1:
-        #     train_sampler.set_epoch(epoch)
-
         for i, batch in enumerate(train_loader):
-            # Added ------------------------------------------------------ #
             print("\n---Start One Epoch Training---\n")
-            # if (i == 1):
-            #     break
-            # ------------------------------------------------------ #
+            
             if rank == 0:
                 start_b = time.time()
             
-            # Changed ------------------------------------------------------ #
-            # sid, text, mel_target, mel_start_idx, wav, \
-            #         D, log_D, f0, energy, \
-            #         src_len, mel_len, max_src_len, max_mel_len = model.parse_batch(batch)
-            # wav_output, mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _  = model(
-            #         text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len, mel_start_idx)
+            # Get Data
             sid, text, mel_target, mel_start_idx, wav, \
                     D, log_D, f0, energy, \
                     src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch, device)
-            # print("mel_len shape: ", mel_len.shape)
+            
+            # Forwards
             mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _ = stylespeech(
                     device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
-            
             indices = [[mel_start_idx[i]+j for j in range(32)] for i in range(c.batch_size)]
-            # print(indices)
             indices = torch.Tensor(indices).type(torch.int64)
             indices = torch.unsqueeze(indices, 2).expand(-1, -1, 80).to(device)
-            # print(indices.shape)
-            # wav_output = generator(mel_output[:, mel_start_idx : mel_start_idx+32])
             wav_output = generator(torch.transpose(torch.gather(mel_output, 1, indices), 1, 2))
-            
             wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, h.hop_size, h.win_size,
                                           h.fmin, h.fmax_for_loss)
-            # -------------------------------------------------------------- #
-            # print("wav shape: ", wav.shape)
-            # print("wav_output shape: ", wav_output.shape)
-            # wav_crop = wav[:, mel_start_idx * h.hop_size:(mel_start_idx + 32) * h.hop_size]
+            
             wav_crop = torch.unsqueeze(wav, 1)
-            # mel_crop = mel_target[:, mel_start_idx:mel_start_idx + 32]
             mel_crop = torch.transpose(torch.gather(mel_target, 1, indices), 1, 2)
-            print("Optimizing Step\n")
 
+            print("Optimizing Step\n")
+            # Optimizing Step
             # GAN D&G step (optimize) ------------------------------------------------------ #
             loss_disc_all = D_step(mpd, msd, optim_d, wav_crop, wav_output.detach(), scaler)
             loss_gen_all = G_step(mpd, msd, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, scaler)
-
             # StyleSpeech optimize ------------------------------------------------------ #
             scheduled_optim.zero_grad()
             loss_ss_all = SS_step(loss_ss, optim_ss, mel_output.detach(), mel_target, 
@@ -202,27 +171,29 @@ def train(rank, a, h, c, gpu_ids):
             # Clipping gradients to avoid gradient explosion
             scaler.unscale_(scheduled_optim._optimizer)
             torch.nn.utils.clip_grad_norm_(stylespeech.parameters(), c.grad_clip_thresh)
-            # Update weights
             scheduled_optim.step_and_update_lr(scaler=scaler)
             # scheduled_optim.step(scaler=scaler)
             scaler.update()
             # scheduled_optim.update_lr()
 
             if rank == 0:
-                # STDOUT logging
+                # STDOUT & log.txt logging
                 if steps % a.stdout_interval == 0:
                     with torch.no_grad():
                         mel_error = F.l1_loss(mel_crop, wav_output_mel).item()
 
-                    print('Steps : {:d}, SS Loss Total : {:4.3f}, Gen Loss Total : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.
-                          format(steps, loss_ss_all.item(), loss_gen_all, mel_error, time.time() - start_b))
+                    str1 = 'Steps : {:d}, SS Loss Total : {:4.3f}, Gen Loss Total : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.format(
+                                 steps, loss_ss_all.item(), loss_gen_all, mel_error, time.time() - start_b)
+                    print(str1)
+                    with open(log_path, "a") as f_log:
+                        f_log.write(str1)
 
                 # checkpointing
                 if steps % a.checkpoint_interval == 0 and steps != 0:
                     print('Checkpointing')
                     checkpoint_path = "{}/ss_{:08d}".format(a.checkpoint_path, steps)
                     save_checkpoint(checkpoint_path,
-                                    {'stylespeech': (stylespeech.module if h.num_gpus > 1 else stylespeech.generator).state_dict()})
+                                    {'stylespeech': stylespeech.state_dict()})
                     checkpoint_path = "{}/g_{:08d}".format(a.checkpoint_path, steps)
                     save_checkpoint(checkpoint_path,
                                     {'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()})
@@ -283,6 +254,21 @@ def train(rank, a, h, c, gpu_ids):
                                               plot_spectrogram(wav_output_spec.squeeze(0).cpu().numpy()), steps)
                                 # sw.add_text('generated/y_hat_txt_{}'.format(j), text[0], steps)
 
+                            if (j == 0):
+                                length = mel_len[0].item()
+                                mel_target = mel_target[0, :length].detach().cpu().transpose(0, 1)
+                                mel = mel_output[0, :length].detach().cpu().transpose(0, 1)
+                                wav_target_mel = mel_crop[0].detach().cpu()
+                                wav_mel = wav_output_mel[0].detach().cpu()
+                                # plotting
+                                # utils_ss.plot_data([mel.numpy(), mel_target.numpy()], 
+                                #     ['Synthesized Spectrogram', 'Ground-Truth Spectrogram'], filename=os.path.join(synth_path, 'step_StyleSpeech_{}.png'.format(steps)))
+                                # utils_ss.plot_data([wav_mel.numpy(), wav_target_mel.numpy()], 
+                                #     ['Synthesized Audio', 'Ground-Truth Audio'], filename=os.path.join(synth_path, 'step_HiFi-GAN_{}.png'.format(steps)))
+                                plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
+                                    ['Synthesized Spectrogram', 'Swav_{}'.format(mel_start_idx[0]), 'Ground-Truth Spectrogram', 'GTwav_{}'.format(mel_start_idx[0])], 
+                                    filename=os.path.join(synth_path, 'step_{}.png'.format(steps)))
+                                print("Synth spectrograms at step {}...\n".format(steps))
                             # new
                             break
                         val_err = val_err_tot / (j+1)
@@ -314,6 +300,8 @@ def main():
     # # parser.add_argument('--input_validation_file', default='LJSpeech-1.1/validation.txt')
     # # Changed ------------------------------------------------------ #
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
+    # parser.add_argument('--log_path', default='./train_log.txt')
+    parser.add_argument('--save_path', default='exp_E2E')
     # parser.add_argument('--input_wavs_dir', default='/v9/dongchan/TTS/dataset/LibriTTS/wav22')
     # parser.add_argument('--input_mels_dir', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed_22/mel')
     # parser.add_argument('--input_training_file', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed_22/train.txt')

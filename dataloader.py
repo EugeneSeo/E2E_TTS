@@ -2,11 +2,12 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
 import os
-from text import text_to_sequence
-from utils.common import pad_1D, pad_2D, process_meta
+from StyleSpeech.text import text_to_sequence
+from StyleSpeech.utils import pad_1D, pad_2D
+from utils import process_meta
 import librosa
 import tgt
-from preprocessors.utils import get_alignment
+from StyleSpeech.preprocessors.utils import get_alignment
 
 
 
@@ -40,7 +41,7 @@ def norm_mean_std(x, mean, std):
 class TextMelDataset(Dataset):
     def __init__(self, data_path, filename="train.txt",):
         self.data_path = data_path
-        self.basename, self.text, self.sid = process_meta(os.path.join(data_path, filename))
+        self.basename, self.text, self.sid = process_meta(data_path, os.path.join(data_path, filename))
 
         self.sid_dict = self.create_speaker_table(self.sid)
 
@@ -75,11 +76,11 @@ class TextMelDataset(Dataset):
 
     ############################################################
     def load_audio(self, sid, basename):
-        tg_path = os.path.join(self.data_path, "TextGrid", sid, "{}.TextGrid".format(basename))
+        tg_path = os.path.join(self.data_path, "TextGrid", str(sid), "{}.TextGrid".format(basename))
         textgrid = tgt.io.read_textgrid(tg_path)
-        phone, duration, start, end = get_alignment(textgrid.get_tier_by_name('phones'))
+        phone, duration, start, end = get_alignment(textgrid.get_tier_by_name('phones'), self.sampling_rate, self.hop_length)
 
-        wav_path = os.path.join(self.data_path, "../wav16", sid, "{}.wav".format(basename))
+        wav_path = os.path.join(self.data_path, "../wav16", str(sid), "{}.wav".format(basename))
         wav, _ = librosa.load(wav_path)
         wav = wav[int(self.sampling_rate*start):int(self.sampling_rate*end)].astype(np.float32)
         return wav
@@ -100,7 +101,9 @@ class TextMelDataset(Dataset):
         if mel_target.shape[0] <= self.num_melbins: # mel length should be longer than mel-window-size 
             return self.__getitem__(idx-1) 
 
-        wav = self.load_audio(sid, basename)
+        real_sid, _, _, _ = basename.split("_")
+        # wav = self.load_audio(sid, basename)
+        wav = self.load_audio(real_sid, basename)
         mel_start_idx = np.random.randint(mel_target.shape[0] - self.num_melbins - 1)
         wav = wav[mel_start_idx * self.hop_length:(mel_start_idx + self.num_melbins) * self.hop_length]
         ##############################################################
@@ -159,6 +162,7 @@ class TextMelDataset(Dataset):
         energies = pad_1D(energies)
         log_Ds = np.log(Ds + 1.)
 
+        # print("mel_targets shape: ", mel_targets.shape)
         out = {"id": ids,
                "sid": np.array(sids),
                "text": texts,
