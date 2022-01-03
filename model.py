@@ -24,13 +24,14 @@ def parse_batch(batch, device):
     # "mel_start_idx": mel_start_idxes, "wav": wavs,
     mel_start_idx = torch.Tensor(batch["mel_start_idx"]).int().to(device)
     # mel_start_idx = batch["mel_start_idx"]
-    wav = torch.Tensor(batch["wav"]).to(device)
+    # wav = torch.Tensor(batch["wav"]).to(device)
+    wav = torch.from_numpy(np.array(batch["wav"])).to(device)
     ##############################################################
     return sid, text, mel_target, mel_start_idx, wav, \
             D, log_D, f0, energy, \
             src_len, mel_len, max_src_len, max_mel_len
 
-def D_step(mpd, msd, optim_d, y, y_g_hat, scaler=None):
+def D_step(mpd, msd, optim_d, y, y_g_hat, scaler=None, retain_graph=True):
     optim_d.zero_grad()
 
     with autocast():
@@ -45,15 +46,15 @@ def D_step(mpd, msd, optim_d, y, y_g_hat, scaler=None):
         loss_disc_all = loss_disc_s + loss_disc_f
         
     if scaler is None:
-        loss_disc_all.backward(retain_graph=True)
+        loss_disc_all.backward(retain_graph=retain_graph)
         optim_d.step()
     else:
-        scaler.scale(loss_disc_all).backward(retain_graph=True)
+        scaler.scale(loss_disc_all).backward(retain_graph=retain_graph)
         scaler.step(optim_d)  
 
     return loss_disc_all
 
-def G_step(mpd, msd, optim_g, y, y_mel, y_g_hat, y_g_hat_mel, scaler=None):
+def G_step(mpd, msd, optim_g, y, y_mel, y_g_hat, y_g_hat_mel, scaler=None, retain_graph=True):
     optim_g.zero_grad()
 
     with autocast():
@@ -69,13 +70,41 @@ def G_step(mpd, msd, optim_g, y, y_mel, y_g_hat, y_g_hat_mel, scaler=None):
         loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel
         
     if scaler is None:
-        loss_gen_all.backward(retain_graph=True)
+        loss_gen_all.backward(retain_graph=retain_graph)
         optim_g.step()
     else:
-        scaler.scale(loss_gen_all).backward(retain_graph=True)
+        scaler.scale(loss_gen_all).backward(retain_graph=retain_graph)
         scaler.step(optim_g)    
 
     return loss_gen_all
+
+def G_step_2(mpd, msd, optim_g, y, y_mel, y_g_hat, y_g_hat_mel, \
+            loss_ss, optim_ss, mel_output, mel_target, log_duration_output, log_D, \
+            f0_output, f0, energy_output, energy, src_len, mel_len,
+            scaler=None, retain_graph=True):
+    optim_g.zero_grad()
+
+    with autocast():
+        # L1 Mel-Spectrogram Loss
+        loss_mel = F.l1_loss(y_mel, y_g_hat_mel) * 45
+
+        y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat)
+        y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat)
+        loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
+        loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
+        loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
+        loss_gen_s, losses_gen_s = generator_loss(y_ds_hat_g)
+        loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel
+        
+    if scaler is None:
+        loss_gen_all.backward(retain_graph=retain_graph)
+        optim_g.step()
+    else:
+        scaler.scale(loss_gen_all).backward(retain_graph=retain_graph)
+        scaler.step(optim_g)    
+
+    return loss_gen_all
+
 '''
 class Trainer(nn.Module):
     def __init__(self):
@@ -140,4 +169,35 @@ def SS_step(loss_ss, optim_ss, mel_output, mel_target, log_duration_output, log_
 
     return total_loss
 
+
+def SS_step_2(loss_ss, optim_ss, mel_output, mel_target, log_duration_output, log_D, \
+            f0_output, f0, energy_output, energy, src_len, mel_len, 
+            mpd, msd, y, y_mel, y_g_hat, y_g_hat_mel, scaler=None):
+    with autocast():
+        # optim_ss.zero_grad()
+        mel_loss, d_loss, f_loss, e_loss = loss_ss(mel_output, mel_target, 
+                log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len)
+
+        # G_loss - ADDED
+        # L1 Mel-Spectrogram Loss
+        loss_mel = F.l1_loss(y_mel, y_g_hat_mel) * 45
+
+        y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat)
+        y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat)
+        loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
+        loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
+        loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
+        loss_gen_s, losses_gen_s = generator_loss(y_ds_hat_g)
+        loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel
+
+        # Total loss
+        total_loss = mel_loss + d_loss + f_loss + e_loss + loss_gen_all
+        
+    # Backward
+    if scaler is None:
+        total_loss.backward()
+    else:
+        scaler.scale(total_loss).backward()
+
+    return total_loss
 

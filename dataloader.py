@@ -104,7 +104,11 @@ class TextMelDataset(Dataset):
         real_sid, _, _, _ = basename.split("_")
         # wav = self.load_audio(sid, basename)
         wav = self.load_audio(real_sid, basename)
-        mel_start_idx = np.random.randint(mel_target.shape[0] - self.num_melbins - 1)
+        if mel_target.shape[0] == self.num_melbins:
+            mel_start_idx = 0
+        else:
+            # mel_start_idx = np.random.randint(mel_target.shape[0] - self.num_melbins - 1)
+            mel_start_idx = np.random.randint(mel_target.shape[0] - self.num_melbins)
         wav = wav[mel_start_idx * self.hop_length:(mel_start_idx + self.num_melbins) * self.hop_length]
         ##############################################################
         

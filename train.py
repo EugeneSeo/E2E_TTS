@@ -6,6 +6,7 @@ import os
 import time
 import argparse
 import json
+import soundfile as sf
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
@@ -37,7 +38,8 @@ from utils import plot_data
 def train(rank, a, h, c, gpu_ids):
     # torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(gpu_ids[0]))
-    
+    print("Start training\n")
+
     # Define model
     generator = Generator(h).to(device)
     stylespeech = StyleSpeech(c).to(device)
@@ -45,10 +47,10 @@ def train(rank, a, h, c, gpu_ids):
     msd = MultiScaleDiscriminator().to(device)
     loss_ss = StyleSpeechLoss()
 
-    # generator = torch.nn.DataParallel(generator, gpu_ids)
-    # # stylespeech = torch.nn.DataParallel(stylespeech, gpu_ids)
-    # mpd = torch.nn.DataParallel(mpd, gpu_ids)
-    # msd = torch.nn.DataParallel(msd, gpu_ids)
+    generator = torch.nn.DataParallel(generator, gpu_ids)
+    # stylespeech = torch.nn.DataParallel(stylespeech, gpu_ids)
+    mpd = torch.nn.DataParallel(mpd, gpu_ids)
+    msd = torch.nn.DataParallel(msd, gpu_ids)
     
     num_param = utils_ss.get_param_num(generator) + utils_ss.get_param_num(stylespeech) \
                 + utils_ss.get_param_num(msd) + utils_ss.get_param_num(mpd)
@@ -69,10 +71,12 @@ def train(rank, a, h, c, gpu_ids):
     if cp_g is None or (cp_do is None or cp_ss is None):
         state_dict_do = None
         # load dongchan's pre-trained model!: Should unblock this code block b4 running
-        # checkpoint_dict_ss = load_checkpoint(checkpoint_path_ss, device)
-        # stylespeech.load_state_dict(checkpoint_dict_ss['model'])
-        # checkpoint_dict_g = load_checkpoint(checkpoint_path_g, device)
-        # generator.load_state_dict(checkpoint_dict_g['generator'])
+        stylespeech.load_state_dict(torch.load("./cp_StyleSpeech/stylespeech.pth.tar")['model'])
+        state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
+        generator.load_state_dict(state_dict_g['generator'])
+        state_dict_do_ = load_checkpoint("./cp_hifigan/do_02500000", device)
+        mpd.load_state_dict(state_dict_do_['mpd'])
+        msd.load_state_dict(state_dict_do_['msd'])
         last_epoch = -1
     else:
         state_dict_ss = load_checkpoint(cp_ss, device)
@@ -82,13 +86,13 @@ def train(rank, a, h, c, gpu_ids):
         generator.load_state_dict(state_dict_g['generator'])
         mpd.load_state_dict(state_dict_do['mpd'])
         msd.load_state_dict(state_dict_do['msd'])
-        # steps = state_dict_do['steps'] + 1
+        steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
 
-        generator = torch.nn.DataParallel(generator, gpu_ids)
-        # stylespeech = torch.nn.DataParallel(stylespeech, gpu_ids)
-        mpd = torch.nn.DataParallel(mpd, gpu_ids)
-        msd = torch.nn.DataParallel(msd, gpu_ids)
+    # generator = torch.nn.DataParallel(generator, gpu_ids)
+    # # stylespeech = torch.nn.DataParallel(stylespeech, gpu_ids)
+    # mpd = torch.nn.DataParallel(mpd, gpu_ids)
+    # msd = torch.nn.DataParallel(msd, gpu_ids)
 
     # Optimizers
     optim_g = torch.optim.AdamW(generator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
@@ -101,6 +105,9 @@ def train(rank, a, h, c, gpu_ids):
         optim_g.load_state_dict(state_dict_do['optim_g'])
         optim_d.load_state_dict(state_dict_do['optim_d'])
         optim_ss.load_state_dict(state_dict_do['optim_ss'])
+    else:
+        optim_g.load_state_dict(state_dict_do_['optim_g'])
+        optim_d.load_state_dict(state_dict_do_['optim_d'])
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
@@ -134,32 +141,34 @@ def train(rank, a, h, c, gpu_ids):
         if rank == 0:
             start = time.time()
             print("Epoch: {}".format(epoch+1))
-
+        
         for i, batch in enumerate(train_loader):
-            print("\n---Start One Epoch Training---\n")
+            # print("\n---Start One Epoch Training---\n")
             
             if rank == 0:
                 start_b = time.time()
             
             # Get Data
+            # print("Get Data\n")
             sid, text, mel_target, mel_start_idx, wav, \
                     D, log_D, f0, energy, \
                     src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch, device)
             
             # Forwards
+            # print("Forwards\n")
             mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _ = stylespeech(
                     device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
             indices = [[mel_start_idx[i]+j for j in range(32)] for i in range(c.batch_size)]
             indices = torch.Tensor(indices).type(torch.int64)
             indices = torch.unsqueeze(indices, 2).expand(-1, -1, 80).to(device)
             wav_output = generator(torch.transpose(torch.gather(mel_output, 1, indices), 1, 2))
-            wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, h.hop_size, h.win_size,
+            wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                           h.fmin, h.fmax_for_loss)
             
             wav_crop = torch.unsqueeze(wav, 1)
             mel_crop = torch.transpose(torch.gather(mel_target, 1, indices), 1, 2)
 
-            print("Optimizing Step\n")
+            # print("Optimizing Step")
             # Optimizing Step
             # GAN D&G step (optimize) ------------------------------------------------------ #
             loss_disc_all = D_step(mpd, msd, optim_d, wav_crop, wav_output.detach(), scaler)
@@ -175,7 +184,7 @@ def train(rank, a, h, c, gpu_ids):
             # scheduled_optim.step(scaler=scaler)
             scaler.update()
             # scheduled_optim.update_lr()
-
+            
             if rank == 0:
                 # STDOUT & log.txt logging
                 if steps % a.stdout_interval == 0:
@@ -215,7 +224,7 @@ def train(rank, a, h, c, gpu_ids):
                     sw.add_scalar("training/mel_spec_error", mel_error, steps)
 
                 # Validation
-                if steps % a.validation_interval == 0:  # and steps != 0:
+                if steps % a.validation_interval == 0 and steps != 0:
                     print('Validation')
                     stylespeech.eval()
                     generator.eval()
@@ -234,24 +243,26 @@ def train(rank, a, h, c, gpu_ids):
                             indices = torch.Tensor(indices).type(torch.int64)
                             indices = torch.unsqueeze(indices, 2).expand(-1, -1, 80).to(device)
                             wav_output = generator(torch.transpose(torch.gather(mel_output, 1, indices), 1, 2))
-                            wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, h.hop_size, h.win_size,
+                            wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                                         h.fmin, h.fmax_for_loss)
                             mel_crop = torch.transpose(torch.gather(mel_target, 1, indices), 1, 2)
                             
+                            wav_crop = torch.unsqueeze(wav, 1)
+
                             val_err_tot += F.l1_loss(mel_crop, wav_output_mel).item()
 
                             if j <= 4:
                                 if steps == 0:
-                                    sw.add_audio('gt/y_{}'.format(j), wav[0], steps, h.sampling_rate)
+                                    sw.add_audio('gt/y_{}'.format(j), wav_crop[0], steps, c.sampling_rate)
                                     sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(mel_crop[0].cpu()), steps)
                                     # sw.add_text('gt/y_txt_{}'.format(j), text[0], steps)
 
-                                sw.add_audio('generated/y_hat_{}'.format(j), wav_output[0], steps, h.sampling_rate)
-                                wav_output_spec = mel_spectrogram(wav_output[0].squeeze(1), h.n_fft, h.num_mels,
-                                                             h.sampling_rate, h.hop_size, h.win_size,
+                                sw.add_audio('generated/y_hat_{}'.format(j), wav_output[0], steps, c.sampling_rate)
+                                wav_output_spec = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels,
+                                                             c.sampling_rate, h.hop_size, h.win_size,
                                                              h.fmin, h.fmax)
                                 sw.add_figure('generated/y_hat_spec_{}'.format(j),
-                                              plot_spectrogram(wav_output_spec.squeeze(0).cpu().numpy()), steps)
+                                              plot_spectrogram(wav_output_spec[0].cpu().numpy()), steps)
                                 # sw.add_text('generated/y_hat_txt_{}'.format(j), text[0], steps)
 
                             if (j == 0):
@@ -261,25 +272,27 @@ def train(rank, a, h, c, gpu_ids):
                                 wav_target_mel = mel_crop[0].detach().cpu()
                                 wav_mel = wav_output_mel[0].detach().cpu()
                                 # plotting
-                                # utils_ss.plot_data([mel.numpy(), mel_target.numpy()], 
-                                #     ['Synthesized Spectrogram', 'Ground-Truth Spectrogram'], filename=os.path.join(synth_path, 'step_StyleSpeech_{}.png'.format(steps)))
-                                # utils_ss.plot_data([wav_mel.numpy(), wav_target_mel.numpy()], 
-                                #     ['Synthesized Audio', 'Ground-Truth Audio'], filename=os.path.join(synth_path, 'step_HiFi-GAN_{}.png'.format(steps)))
                                 plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
                                     ['Synthesized Spectrogram', 'Swav_{}'.format(mel_start_idx[0]), 'Ground-Truth Spectrogram', 'GTwav_{}'.format(mel_start_idx[0])], 
                                     filename=os.path.join(synth_path, 'step_{}.png'.format(steps)))
                                 print("Synth spectrograms at step {}...\n".format(steps))
-                            # new
-                            break
+                                wav_output_val_path = os.path.join(synth_path, 'step_{}_synth.wav'.format(steps))
+                                wav_val_path = os.path.join(synth_path, 'step_{}_gt.wav'.format(steps))
+                                # librosa.output.write_wav(wav_output_val_path, wav_output.squeeze(1)[0], c.sampling_rate)
+                                # librosa.output.write_wav(wav_val_path, wav[0], c.sampling_rate)
+                                sf.write(wav_output_val_path, wav_output.squeeze(1)[0].cpu(), c.sampling_rate)
+                                sf.write(wav_val_path, wav[0].cpu(), c.sampling_rate)
+                            # # new
+                            # break
                         val_err = val_err_tot / (j+1)
                         sw.add_scalar("validation/mel_spec_error", val_err, steps)
 
                     stylespeech.train()
                     generator.train()
                     # model.train()
-                
+                   
             steps += 1
-            break
+            # break
 
         scheduler_g.step()
         scheduler_d.step()
@@ -300,20 +313,15 @@ def main():
     # # parser.add_argument('--input_validation_file', default='LJSpeech-1.1/validation.txt')
     # # Changed ------------------------------------------------------ #
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
-    # parser.add_argument('--log_path', default='./train_log.txt')
     parser.add_argument('--save_path', default='exp_E2E')
-    # parser.add_argument('--input_wavs_dir', default='/v9/dongchan/TTS/dataset/LibriTTS/wav22')
-    # parser.add_argument('--input_mels_dir', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed_22/mel')
-    # parser.add_argument('--input_training_file', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed_22/train.txt')
-    # parser.add_argument('--input_validation_file', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed_22/val.txt')
     # # -------------------------------------------------------------- #
     parser.add_argument('--checkpoint_path', default='cp_E2E_TTS')
-    parser.add_argument('--config', default='')
+    parser.add_argument('--config', default='./hifi_gan/config_v1.json')
     parser.add_argument('--training_epochs', default=3100, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=5000, type=int)
     parser.add_argument('--summary_interval', default=100, type=int)
-    parser.add_argument('--validation_interval', default=1000, type=int)
+    parser.add_argument('--validation_interval', default=3000, type=int)
     parser.add_argument('--fine_tuning', default=False, type=bool)
     # Added
     parser.add_argument('--config_ss', default='./StyleSpeech/configs/config.json') # Configurations for StyleSpeech model
@@ -335,15 +343,15 @@ def main():
     utils_ss.build_env(a.config_ss, 'config_ss.json', a.checkpoint_path)
     # -------------------------------------------------------------- #
 
-    torch.manual_seed(h.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(h.seed)
-        h.num_gpus = torch.cuda.device_count()
-        h.batch_size = int(h.batch_size / h.num_gpus)
-        # print('Batch size per GPU :', h.batch_size)
-        print('Batch size per GPU :', config.batch_size)
-    else:
-        pass
+    # torch.manual_seed(h.seed)
+    # if torch.cuda.is_available():
+    #     torch.cuda.manual_seed(h.seed)
+    #     h.num_gpus = torch.cuda.device_count()
+    #     h.batch_size = int(h.batch_size / h.num_gpus)
+    #     # print('Batch size per GPU :', h.batch_size)
+    #     print('Batch size per GPU :', config.batch_size)
+    # else:
+    #     pass
 
     # if h.num_gpus > 1:
     #     mp.spawn(train, nprocs=h.num_gpus, args=(a, h,))
@@ -354,7 +362,8 @@ def main():
     #     mp.spawn(train, nprocs=h.num_gpus, args=(a, h, config,))
     # else:
     #     train(0, a, h, config)
-    gpu_ids = [4, 5, 6]
+    gpu_ids = [0, 1]
+    h.num_gpus = len(gpu_ids)
     train(0, a, h, config, gpu_ids)
     # -------------------------------------------------------------- #
 
