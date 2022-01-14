@@ -210,10 +210,10 @@ def train(rank, a, h, c, gpu_ids):
                 else:
                     scaler.unscale_(scheduled_optim._optimizer)
                     torch.nn.utils.clip_grad_norm_(stylespeech.parameters(), c.grad_clip_thresh)
-                    scheduled_optim.step_and_update_lr(scaler=None)
-                    # scheduled_optim.step(scaler=scaler)
+                    # scheduled_optim.step_and_update_lr(scaler=None)
+                    scheduled_optim.step(scaler=scaler)
                     scaler.update()
-                    # scheduled_optim.update_lr()
+                    scheduled_optim.update_lr()
             
             if rank == 0:
                 # STDOUT & log.txt logging
