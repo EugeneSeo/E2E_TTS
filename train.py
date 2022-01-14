@@ -65,10 +65,9 @@ def train(rank, a, h, c, gpu_ids):
 
     # Add cp_ss & loading code
     steps = 0
-    # if cp_g is None or (cp_do is None or cp_ss is None):
-    if True:
+    if cp_g is None or (cp_do is None or cp_ss is None):
+    # if True:
         state_dict_do = None
-        # load dongchan's pre-trained model!: Should unblock this code block b4 running
         stylespeech.load_state_dict(torch.load("./cp_StyleSpeech/stylespeech.pth.tar")['model'])
         state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
         generator.load_state_dict(state_dict_g['generator'])
@@ -105,7 +104,6 @@ def train(rank, a, h, c, gpu_ids):
         optim_g = torch.optim.AdamW(itertools.chain(generator.parameters(), stylespeech.parameters()), a.lr_g, betas=[h.adam_b1, h.adam_b2])
     optim_d = torch.optim.AdamW(itertools.chain(msd.parameters(), mpd.parameters()),
                                 a.lr_d, betas=[h.adam_b1, h.adam_b2])
-    # optim_ss = torch.optim.Adam(stylespeech.parameters(), betas=c.betas, eps=c.eps)
     print("Optimizer and Loss Function Defined.")
 
     if state_dict_do is not None:
@@ -124,7 +122,6 @@ def train(rank, a, h, c, gpu_ids):
 
     train_loader = prepare_dataloader(a.data_path, "train.txt", shuffle=True, batch_size=c.batch_size) 
     if rank == 0:        
-        # validation_loader = prepare_dataloader(a.data_path, "val.txt", shuffle=True, batch_size=c.batch_size) 
         validation_loader = prepare_dataloader(a.data_path, "val.txt", shuffle=True, batch_size=1, val=True) 
         sw = SummaryWriter(os.path.join(a.save_path, 'logs'))
         # Init logger
@@ -137,7 +134,7 @@ def train(rank, a, h, c, gpu_ids):
     os.makedirs(synth_path, exist_ok=True)
 
     print("Data Loader is Prepared.")
-    # model.train()
+    
     stylespeech.train()
     generator.train()
     mpd.train()
