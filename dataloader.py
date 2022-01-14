@@ -11,8 +11,8 @@ from StyleSpeech.preprocessors.utils import get_alignment
 
 
 
-def prepare_dataloader(data_path, filename, batch_size, shuffle=True, num_workers=2, meta_learning=False, seed=0):
-    dataset = TextMelDataset(data_path, filename)
+def prepare_dataloader(data_path, filename, batch_size, shuffle=True, num_workers=2, meta_learning=False, seed=0, val=False):
+    dataset = TextMelDataset(data_path, filename, val=val)
     if meta_learning:
         sampler = MetaBatchSampler(dataset.sid_to_indexes, batch_size, seed=seed)
     else:
@@ -39,7 +39,7 @@ def norm_mean_std(x, mean, std):
 
 
 class TextMelDataset(Dataset):
-    def __init__(self, data_path, filename="train.txt",):
+    def __init__(self, data_path, filename="train.txt", val=False):
         self.data_path = data_path
         self.basename, self.text, self.sid = process_meta(data_path, os.path.join(data_path, filename))
 
@@ -58,6 +58,9 @@ class TextMelDataset(Dataset):
         
         self.create_sid_to_index()
         print('Speaker Num :{}'.format(len(self.sid_dict)))
+
+        #new
+        self.val = val
     
     def create_speaker_table(self, sids):
         speaker_ids = np.sort(np.unique(sids))
@@ -81,7 +84,7 @@ class TextMelDataset(Dataset):
         phone, duration, start, end = get_alignment(textgrid.get_tier_by_name('phones'), self.sampling_rate, self.hop_length)
 
         wav_path = os.path.join(self.data_path, "../wav16", str(sid), "{}.wav".format(basename))
-        wav, _ = librosa.load(wav_path)
+        wav, _ = librosa.load(wav_path, sr=self.sampling_rate)
         wav = wav[int(self.sampling_rate*start):int(self.sampling_rate*end)].astype(np.float32)
         return wav
     #################################################################
@@ -102,14 +105,13 @@ class TextMelDataset(Dataset):
             return self.__getitem__(idx-1) 
 
         real_sid, _, _, _ = basename.split("_")
-        # wav = self.load_audio(sid, basename)
         wav = self.load_audio(real_sid, basename)
         if mel_target.shape[0] == self.num_melbins:
             mel_start_idx = 0
         else:
-            # mel_start_idx = np.random.randint(mel_target.shape[0] - self.num_melbins - 1)
             mel_start_idx = np.random.randint(mel_target.shape[0] - self.num_melbins)
-        wav = wav[mel_start_idx * self.hop_length:(mel_start_idx + self.num_melbins) * self.hop_length]
+        if self.val == False:
+            wav = wav[mel_start_idx * self.hop_length:(mel_start_idx + self.num_melbins) * self.hop_length]
         ##############################################################
         
         D_path = os.path.join(
@@ -166,7 +168,6 @@ class TextMelDataset(Dataset):
         energies = pad_1D(energies)
         log_Ds = np.log(Ds + 1.)
 
-        # print("mel_targets shape: ", mel_targets.shape)
         out = {"id": ids,
                "sid": np.array(sids),
                "text": texts,
