@@ -16,7 +16,7 @@ from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from hifi_gan.env import AttrDict, build_env
 from hifi_gan.meldataset import mel_spectrogram
-from hifi_gan.models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
+from hifi_gan.models import Generator2, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
     discriminator_loss
 from hifi_gan.utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
 torch.backends.cudnn.benchmark = True
@@ -40,7 +40,7 @@ def train(rank, a, h, c, gpu_ids):
     print("Start training\n")
 
     # Define model
-    generator = Generator(h).to(device)
+    generator = Generator2(h).to(device)
     stylespeech = StyleSpeech(c).to(device)
     mpd = MultiPeriodDiscriminator().to(device)
     msd = MultiScaleDiscriminator().to(device)
@@ -69,8 +69,8 @@ def train(rank, a, h, c, gpu_ids):
     # if True:
         state_dict_do = None
         stylespeech.load_state_dict(torch.load("./cp_StyleSpeech/stylespeech.pth.tar")['model'])
-        state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
-        generator.load_state_dict(state_dict_g['generator'])
+        # state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
+        # generator.load_state_dict(state_dict_g['generator'])
         state_dict_do_ = load_checkpoint("./cp_hifigan/do_02500000", device)
         mpd.load_state_dict(state_dict_do_['mpd'])
         msd.load_state_dict(state_dict_do_['msd'])
@@ -82,10 +82,10 @@ def train(rank, a, h, c, gpu_ids):
         msd = torch.nn.DataParallel(msd, gpu_ids)
     else:
         state_dict_ss = load_checkpoint(cp_ss, device)
-        state_dict_g = load_checkpoint(cp_g, device)
+        # state_dict_g = load_checkpoint(cp_g, device)
         state_dict_do = load_checkpoint(cp_do, device)
         stylespeech.load_state_dict(state_dict_ss['stylespeech'])
-        generator.load_state_dict(state_dict_g['generator'])
+        # generator.load_state_dict(state_dict_g['generator'])
         mpd.load_state_dict(state_dict_do['mpd'])
         msd.load_state_dict(state_dict_do['msd'])
         steps = state_dict_do['steps'] + 1
@@ -107,12 +107,12 @@ def train(rank, a, h, c, gpu_ids):
     print("Optimizer and Loss Function Defined.")
 
     if state_dict_do is not None:
-        optim_g.load_state_dict(state_dict_do['optim_g'])
+        # optim_g.load_state_dict(state_dict_do['optim_g'])
         optim_d.load_state_dict(state_dict_do['optim_d'])
         optim_ss.load_state_dict(state_dict_do['optim_ss'])
     else:
-        if (a.optim_g == "G_only"):
-            optim_g.load_state_dict(state_dict_do_['optim_g'])
+        # if (a.optim_g == "G_only"):
+        #     optim_g.load_state_dict(state_dict_do_['optim_g'])
         optim_d.load_state_dict(state_dict_do_['optim_d'])
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
@@ -120,6 +120,7 @@ def train(rank, a, h, c, gpu_ids):
     if (a.optim_g == "G_only"):
         scheduled_optim = ScheduledOptim(optim_ss, c.decoder_hidden, c.n_warm_up_step, steps)
 
+    c.batch_size = 2
     train_loader = prepare_dataloader(a.data_path, "train.txt", shuffle=True, batch_size=c.batch_size) 
     if rank == 0:        
         validation_loader = prepare_dataloader(a.data_path, "val.txt", shuffle=True, batch_size=1, val=True) 
@@ -164,20 +165,31 @@ def train(rank, a, h, c, gpu_ids):
                     src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch, device)
             
             # Forwards
+            #################################################
             # mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _ = stylespeech(
             #         device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
-            mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, _, _ = stylespeech(
+            mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = stylespeech(
                     device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
             indices = [[mel_start_idx[i]+j for j in range(32)] for i in range(c.batch_size)]
             indices = torch.Tensor(indices).type(torch.int64)
-            indices = torch.unsqueeze(indices, 2).expand(-1, -1, 80).to(device)
-            wav_output = generator(torch.transpose(torch.gather(mel_output, 1, indices), 1, 2))
+            # indices = torch.unsqueeze(indices, 2).expand(-1, -1, 80).to(device)
+            indices = torch.unsqueeze(indices, 2).expand(-1, -1, 256).to(device)
+            # wav_output = generator(torch.transpose(torch.gather(mel_output, 1, indices), 1, 2))
+            for i in range(len(hidden_output)):
+                hidden_output[i] = torch.gather(hidden_output[i].detach(), 1, indices)
+            wav_output = generator(torch.transpose(torch.gather(acoustic_adaptor_output.detach(), 1, indices), 1, 2), hidden_output)
+            #################################################
             wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                           h.fmin, h.fmax_for_loss)
             
             wav_crop = torch.unsqueeze(wav, 1)
-            mel_crop = torch.transpose(torch.gather(mel_target, 1, indices), 1, 2)
-            # mel_crop = torch.transpose(torch.gather(mel_output, 1, indices), 1, 2)
+
+            indices2 = [[mel_start_idx[i]+j for j in range(32)] for i in range(c.batch_size)]
+            indices2 = torch.Tensor(indices2).type(torch.int64)
+            indices2 = torch.unsqueeze(indices2, 2).expand(-1, -1, 80).to(device)
+
+            mel_crop = torch.transpose(torch.gather(mel_target, 1, indices2), 1, 2)
+            # mel_crop = torch.transpose(torch.gather(mel_output, 1, indices2), 1, 2)
 
             # Optimizing Step
             # GAN D step
@@ -217,6 +229,8 @@ def train(rank, a, h, c, gpu_ids):
                     scaler.update()
                     scheduled_optim.update_lr()
             
+            print("loss_gen_all: ", loss_gen_all.item())
+            return
             if rank == 0:
                 # STDOUT & log.txt logging
                 if steps % a.stdout_interval == 0:
@@ -340,7 +354,7 @@ def main():
     a = parser.parse_args()
     a.use_scaler = bool(a.use_scaler)
     a.freeze_ss = bool(a.freeze_ss)
-
+    
     with open(a.config) as f:
         data = f.read()
 

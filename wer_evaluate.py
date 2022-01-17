@@ -119,7 +119,6 @@ def main():
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
     parser.add_argument('--checkpoint_path', default='cp_default')
     parser.add_argument('--checkpoint_step', default='00005000')
-    parser.add_argument('--fine_tuning', default=False, type=bool)
     parser.add_argument('--val_type', default='val') # val or unseen
     parser.add_argument('--config', default='./hifi_gan/config_v1.json')
     parser.add_argument('--config_ss', default='./StyleSpeech/configs/config.json') # Configurations for StyleSpeech model

@@ -53,10 +53,14 @@ class StyleSpeech(nn.Module):
         acoustic_adaptor_output, d_prediction, p_prediction, e_prediction, mel_len, mel_mask = self.variance_adaptor(
                 device, encoder_output, src_mask, mel_len, mel_mask, 
                         d_target, p_target, e_target, max_mel_len)
+        #################################################
         # Deocoding
-        mel_prediction, _ = self.decoder(acoustic_adaptor_output, style_vector, mel_mask)
-
-        return mel_prediction, src_embedded, style_vector, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len
+        # mel_prediction, _ = self.decoder(acoustic_adaptor_output, style_vector, mel_mask) # original
+        # return mel_prediction, src_embedded, style_vector, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len # original
+        
+        mel_prediction, _, hidden_output = self.decoder(acoustic_adaptor_output, style_vector, mel_mask)
+        return mel_prediction, src_embedded, style_vector, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len, acoustic_adaptor_output, hidden_output
+        #################################################
 
     def inference(self, device, style_vector, src_seq, src_len=None, max_src_len=None, return_attn=False):
         src_mask = get_mask_from_lengths(src_len, device, max_src_len)
@@ -68,8 +72,11 @@ class StyleSpeech(nn.Module):
         acoustic_adaptor_output, d_prediction, p_prediction, e_prediction, \
                 mel_len, mel_mask = self.variance_adaptor(encoder_output, src_mask)
 
+        #################################################
         # Deocoding
-        mel_output, dec_slf_attn = self.decoder(acoustic_adaptor_output, style_vector, mel_mask)
+        # mel_output, dec_slf_attn = self.decoder(acoustic_adaptor_output, style_vector, mel_mask) # original
+        mel_output, dec_slf_attn, _ = self.decoder(acoustic_adaptor_output, style_vector, mel_mask)
+        #################################################
 
         if return_attn:
             return enc_slf_attn, dec_slf_attn
@@ -194,15 +201,24 @@ class Decoder(nn.Module):
         dec_output = dec_embedded + position_embedded
         # fft blocks
         slf_attn = []
+        #################################################
+        output = []
+        #################################################
         for dec_layer in self.layer_stack:
             dec_output, dec_slf_attn = dec_layer(
                 dec_output, style_code,
                 mask=mask,
                 slf_attn_mask=slf_attn_mask)
             slf_attn.append(dec_slf_attn)
+            #################################################
+            output.append(dec_output)
+            #################################################
         # last fc
         dec_output = self.fc_out(dec_output)
-        return dec_output, slf_attn
+        #################################################
+        # return dec_output, slf_attn # original
+        return dec_output, slf_attn, output
+        #################################################
 
 
 class FFTBlock(nn.Module):

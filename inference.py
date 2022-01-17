@@ -32,7 +32,9 @@ def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     sid, text, mel_target, mel_start_idx, wav, \
                 D, log_D, f0, energy, \
                 src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch, device)
-    mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _ = SS(
+    # mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _ = SS(
+    #             device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
+    mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, _, _ = SS(
                 device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
     wav_output = G(torch.transpose(mel_output, 1, 2))
     wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
@@ -92,7 +94,8 @@ def inference(a, h, c, max_inf=None):
     count = 0
 
     os.makedirs(a.save_path, exist_ok=True)
-    device =  torch.device('cuda:{:d}'.format(0))
+    device = torch.device('cuda:{:d}'.format(0))
+
     generator = Generator(h).to(device)
     stylespeech = StyleSpeech(c).to(device)
 
@@ -110,6 +113,7 @@ def inference(a, h, c, max_inf=None):
             break
         basename = batch["id"][0]
         create_wav(a, h, c, generator, stylespeech, batch, exp_code, basename)
+        break
         count += 1
 
 def main():
@@ -118,12 +122,12 @@ def main():
     parser.add_argument('--group_name', default=None)
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
     parser.add_argument('--save_path', default='test')
-    parser.add_argument('--checkpoint_path', default='cp_20220111_2')
-    parser.add_argument('--checkpoint_step', default='00003000')
+    parser.add_argument('--checkpoint_path', default='cp_20220111_5')
+    parser.add_argument('--checkpoint_step', default='00005000')
     parser.add_argument('--config', default='./hifi_gan/config_v1.json')
     parser.add_argument('--config_ss', default='./StyleSpeech/configs/config.json') # Configurations for StyleSpeech model
     parser.add_argument('--max_inf', default=10, type=int)
-    parser.add_argument('--finetuning', default=True, type=bool)
+    parser.add_argument('--finetuning', default="No") # No or Yes
 
     a = parser.parse_args()
     with open(a.config) as f:
@@ -138,9 +142,11 @@ def main():
 
     gpu_ids = [0]
     h.num_gpus = len(gpu_ids)
-    if a.finetuning:
+
+    print(a.finetuning)
+    if a.finetuning == "Yes":
         inference_f(a, h, config, a.max_inf)
-    else:
+    else: # "No"
         inference(a, h, config, a.max_inf)
 
 if __name__ == '__main__':
