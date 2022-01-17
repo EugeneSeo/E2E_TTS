@@ -172,7 +172,6 @@ def train(rank, a, h, c, gpu_ids):
                     device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
             indices = [[mel_start_idx[i]+j for j in range(32)] for i in range(c.batch_size)]
             indices = torch.Tensor(indices).type(torch.int64)
-            # indices = torch.unsqueeze(indices, 2).expand(-1, -1, 80).to(device)
             indices = torch.unsqueeze(indices, 2).expand(-1, -1, 256).to(device)
             # wav_output = generator(torch.transpose(torch.gather(mel_output, 1, indices), 1, 2))
             for i in range(len(hidden_output)):
