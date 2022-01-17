@@ -65,8 +65,8 @@ def train(rank, a, h, c, gpu_ids):
 
     # Add cp_ss & loading code
     steps = 0
-    if cp_g is None or (cp_do is None or cp_ss is None):
-    # if True:
+    # if cp_g is None or (cp_do is None or cp_ss is None):
+    if True:
         state_dict_do = None
         stylespeech.load_state_dict(torch.load("./cp_StyleSpeech/stylespeech.pth.tar")['model'])
         # state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
@@ -120,7 +120,6 @@ def train(rank, a, h, c, gpu_ids):
     if (a.optim_g == "G_only"):
         scheduled_optim = ScheduledOptim(optim_ss, c.decoder_hidden, c.n_warm_up_step, steps)
 
-    c.batch_size = 2
     train_loader = prepare_dataloader(a.data_path, "train.txt", shuffle=True, batch_size=c.batch_size) 
     if rank == 0:        
         validation_loader = prepare_dataloader(a.data_path, "val.txt", shuffle=True, batch_size=1, val=True) 
@@ -228,8 +227,6 @@ def train(rank, a, h, c, gpu_ids):
                     scaler.update()
                     scheduled_optim.update_lr()
             
-            print("loss_gen_all: ", loss_gen_all.item())
-            return
             if rank == 0:
                 # STDOUT & log.txt logging
                 if steps % a.stdout_interval == 0:
@@ -286,10 +283,10 @@ def train(rank, a, h, c, gpu_ids):
                                     D, log_D, f0, energy, \
                                     src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch, device)
                             
-                            mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _ = stylespeech(
+                            mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = stylespeech(
                                     device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
                             
-                            wav_output = generator(torch.transpose(mel_output, 1, 2))
+                            wav_output = generator(torch.transpose(acoustic_adaptor_output.detach(), 1, 2), hidden_output)
                             wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                                         h.fmin, h.fmax_for_loss)
                             mel_crop = torch.transpose(mel_target, 1, 2)
