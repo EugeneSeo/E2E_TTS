@@ -1,27 +1,20 @@
 import torch
 import torch.nn as nn
 import numpy as np
-# from text.symbols import symbols
-# import models.Constants as Constants
-# from models.Modules import Mish, LinearNorm, ConvNorm, Conv1dGLU, \
-#                     MultiHeadAttention, StyleAdaptiveLayerNorm, get_sinusoid_encoding_table
-# from models.VarianceAdaptor import VarianceAdaptor
-# from models.Loss import StyleSpeechLoss
+
 from StyleSpeech.text.symbols import symbols
 import StyleSpeech.models.Constants as Constants
 from StyleSpeech.models.Modules import Mish, LinearNorm, ConvNorm, Conv1dGLU, \
                     MultiHeadAttention, StyleAdaptiveLayerNorm, get_sinusoid_encoding_table
 from StyleSpeech.models.VarianceAdaptor import VarianceAdaptor
 from StyleSpeech.models.Loss import StyleSpeechLoss
-# from StyleSpeech.utils import get_mask_from_lengths
 from utils import get_mask_from_lengths
 
 
-class StyleSpeech(nn.Module):
+class Speech(nn.Module):
     ''' StyleSpeech '''
     def __init__(self, config):
-        super(StyleSpeech, self).__init__()
-        self.style_encoder = MelStyleEncoder(config)
+        super(Speech, self).__init__()
         self.encoder = Encoder(config)
         self.variance_adaptor = VarianceAdaptor(config)
         self.decoder = Decoder(config)
@@ -45,53 +38,36 @@ class StyleSpeech(nn.Module):
         src_mask = get_mask_from_lengths(src_len, device, max_src_len)
         mel_mask = get_mask_from_lengths(mel_len, device, max_mel_len) if mel_len is not None else None
         
-        # Extract Style Vector
-        style_vector = self.style_encoder(mel_target, mel_mask)
         # Encoding
-        encoder_output, src_embedded, _ = self.encoder(src_seq, style_vector, src_mask)
+        encoder_output, src_embedded, _ = self.encoder(src_seq, src_mask)
         # Variance Adaptor
         acoustic_adaptor_output, d_prediction, p_prediction, e_prediction, mel_len, mel_mask = self.variance_adaptor(
                 device, encoder_output, src_mask, mel_len, mel_mask, 
                         d_target, p_target, e_target, max_mel_len)
-        #################################################
-        # Deocoding
-        # mel_prediction, _ = self.decoder(acoustic_adaptor_output, style_vector, mel_mask) # original
-        # return mel_prediction, src_embedded, style_vector, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len # original
         
-        mel_prediction, _, hidden_output = self.decoder(acoustic_adaptor_output, style_vector, mel_mask)
-        return mel_prediction, src_embedded, style_vector, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len, acoustic_adaptor_output, hidden_output
-        #################################################
+        mel_prediction, _, hidden_output = self.decoder(acoustic_adaptor_output, mel_mask)
+        return mel_prediction, src_embedded, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len, acoustic_adaptor_output, hidden_output
 
-    def inference(self, device, style_vector, src_seq, src_len=None, max_src_len=None, return_attn=False):
+    def inference(self, device, src_seq, src_len=None, max_src_len=None, return_attn=False):
         src_mask = get_mask_from_lengths(src_len, device, max_src_len)
         
         # Encoding
-        encoder_output, src_embedded, enc_slf_attn = self.encoder(src_seq, style_vector, src_mask)
+        encoder_output, src_embedded, enc_slf_attn = self.encoder(src_seq, src_mask)
 
         # Variance Adaptor
         acoustic_adaptor_output, d_prediction, p_prediction, e_prediction, \
                 mel_len, mel_mask = self.variance_adaptor(encoder_output, src_mask)
 
-        #################################################
         # Deocoding
-        # mel_output, dec_slf_attn = self.decoder(acoustic_adaptor_output, style_vector, mel_mask) # original
-        mel_output, dec_slf_attn, _ = self.decoder(acoustic_adaptor_output, style_vector, mel_mask)
-        #################################################
+        mel_output, dec_slf_attn, _ = self.decoder(acoustic_adaptor_output, mel_mask)
 
         if return_attn:
             return enc_slf_attn, dec_slf_attn
 
         return mel_output, src_embedded, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len
 
-    def get_style_vector(self, mel_target, mel_len=None):
-        mel_mask = get_mask_from_lengths(mel_len) if mel_len is not None else None
-        style_vector = self.style_encoder(mel_target, mel_mask)
-
-        return style_vector
-
     def get_criterion(self):
         return StyleSpeechLoss()
-
 
 class Encoder(nn.Module):
     ''' Encoder '''
@@ -106,7 +82,6 @@ class Encoder(nn.Module):
         self.d_inner = config.fft_conv1d_filter_size
         self.fft_conv1d_kernel_size = config.fft_conv1d_kernel_size
         self.d_out = config.decoder_hidden
-        self.style_dim = config.style_vector_dim
         self.dropout = config.dropout
 
         self.src_word_emb = nn.Embedding(n_src_vocab, self.d_model, padding_idx=Constants.PAD)
@@ -118,11 +93,11 @@ class Encoder(nn.Module):
 
         self.layer_stack = nn.ModuleList([FFTBlock(
             self.d_model, self.d_inner, self.n_head, self.d_k, self.d_v, 
-            self.fft_conv1d_kernel_size, self.style_dim, self.dropout) for _ in range(self.n_layers)])
+            self.fft_conv1d_kernel_size, self.dropout) for _ in range(self.n_layers)])
 
         self.fc_out = nn.Linear(self.d_model, self.d_out)
 
-    def forward(self, src_seq, style_vector, mask):
+    def forward(self, src_seq, mask):
         batch_size, max_len = src_seq.shape[0], src_seq.shape[1]
         
         # -- Prepare masks
@@ -143,7 +118,7 @@ class Encoder(nn.Module):
         slf_attn = []
         for enc_layer in self.layer_stack:
             enc_output, enc_slf_attn = enc_layer(
-                enc_output, style_vector, 
+                enc_output, 
                 mask=mask, 
                 slf_attn_mask=slf_attn_mask)
             slf_attn.append(enc_slf_attn)
@@ -165,7 +140,6 @@ class Decoder(nn.Module):
         self.d_inner = config.fft_conv1d_filter_size
         self.fft_conv1d_kernel_size = config.fft_conv1d_kernel_size
         self.d_out = config.n_mel_channels
-        self.style_dim = config.style_vector_dim
         self.dropout = config.dropout
 
         self.prenet = nn.Sequential(
@@ -181,7 +155,7 @@ class Decoder(nn.Module):
 
         self.layer_stack = nn.ModuleList([FFTBlock(
             self.d_model, self.d_inner, self.n_head, self.d_k, self.d_v, 
-            self.fft_conv1d_kernel_size, self.style_dim, self.dropout) for _ in range(self.n_layers)])
+            self.fft_conv1d_kernel_size, self.dropout) for _ in range(self.n_layers)])
 
         self.fc_out = nn.Sequential(
             nn.Linear(self.d_model, self.d_model),
@@ -189,7 +163,7 @@ class Decoder(nn.Module):
             nn.Linear(self.d_model, self.d_out)
         )
 
-    def forward(self, enc_seq, style_code, mask):
+    def forward(self, enc_seq, mask):
         batch_size, max_len = enc_seq.shape[0], enc_seq.shape[1]
         # -- Prepare masks
         slf_attn_mask = mask.unsqueeze(1).expand(-1, max_len, -1)
@@ -205,49 +179,38 @@ class Decoder(nn.Module):
         dec_output = dec_embedded + position_embedded
         # fft blocks
         slf_attn = []
-        #################################################
         output = []
-        #################################################
         for dec_layer in self.layer_stack:
             dec_output, dec_slf_attn = dec_layer(
-                dec_output, style_code,
+                dec_output,
                 mask=mask,
                 slf_attn_mask=slf_attn_mask)
             slf_attn.append(dec_slf_attn)
-            #################################################
             output.append(dec_output)
-            #################################################
+            
         # last fc
         dec_output = self.fc_out(dec_output)
-        #################################################
-        # return dec_output, slf_attn # original
         return dec_output, slf_attn, output
-        #################################################
-
 
 class FFTBlock(nn.Module):
     ''' FFT Block '''
     def __init__(self, d_model,d_inner,
-                    n_head, d_k, d_v, fft_conv1d_kernel_size, style_dim, dropout):
+                    n_head, d_k, d_v, fft_conv1d_kernel_size, dropout):
         super(FFTBlock, self).__init__()
         self.slf_attn = MultiHeadAttention(
             n_head, d_model, d_k, d_v, dropout=dropout)
-        self.saln_0 = StyleAdaptiveLayerNorm(d_model, style_dim)
 
         self.pos_ffn = PositionwiseFeedForward(
             d_model, d_inner, fft_conv1d_kernel_size, dropout=dropout)
-        self.saln_1 = StyleAdaptiveLayerNorm(d_model, style_dim)
 
-    def forward(self, input, style_vector, mask=None, slf_attn_mask=None):
+    def forward(self, input, mask=None, slf_attn_mask=None):
         # multi-head self attn
         slf_attn_output, slf_attn = self.slf_attn(input, mask=slf_attn_mask)
-        slf_attn_output = self.saln_0(slf_attn_output, style_vector)
         if mask is not None:
             slf_attn_output = slf_attn_output.masked_fill(mask.unsqueeze(-1), 0)
 
         # position wise FF
         output = self.pos_ffn(slf_attn_output)
-        output = self.saln_1(output, style_vector)
         if mask is not None:
             output = output.masked_fill(mask.unsqueeze(-1), 0)
 
@@ -273,68 +236,6 @@ class PositionwiseFeedForward(nn.Module):
 
         output = self.dropout(output) + residual
         return output
-
-
-class MelStyleEncoder(nn.Module):
-    ''' MelStyleEncoder '''
-    def __init__(self, config):
-        super(MelStyleEncoder, self).__init__()
-        self.in_dim = config.n_mel_channels 
-        self.hidden_dim = config.style_hidden
-        self.out_dim = config.style_vector_dim
-        self.kernel_size = config.style_kernel_size
-        self.n_head = config.style_head
-        self.dropout = config.dropout
-
-        self.spectral = nn.Sequential(
-            LinearNorm(self.in_dim, self.hidden_dim),
-            Mish(),
-            nn.Dropout(self.dropout),
-            LinearNorm(self.hidden_dim, self.hidden_dim),
-            Mish(),
-            nn.Dropout(self.dropout)
-        )
-
-        self.temporal = nn.Sequential(
-            Conv1dGLU(self.hidden_dim, self.hidden_dim, self.kernel_size, self.dropout),
-            Conv1dGLU(self.hidden_dim, self.hidden_dim, self.kernel_size, self.dropout),
-        )
-
-        self.slf_attn = MultiHeadAttention(self.n_head, self.hidden_dim, 
-                                self.hidden_dim//self.n_head, self.hidden_dim//self.n_head, self.dropout) 
-
-        self.fc = LinearNorm(self.hidden_dim, self.out_dim)
-
-    def temporal_avg_pool(self, x, mask=None):
-        if mask is None:
-            out = torch.mean(x, dim=1)
-        else:
-            len_ = (~mask).sum(dim=1).unsqueeze(1)
-            x = x.masked_fill(mask.unsqueeze(-1), 0)
-            x = x.sum(dim=1)
-            out = torch.div(x, len_)
-        return out
-
-    def forward(self, x, mask=None):
-        max_len = x.shape[1]
-        slf_attn_mask = mask.unsqueeze(1).expand(-1, max_len, -1) if mask is not None else None
-        
-        # spectral
-        x = self.spectral(x)
-        # temporal
-        x = x.transpose(1,2)
-        x = self.temporal(x)
-        x = x.transpose(1,2)
-        # self-attention
-        if mask is not None:
-            x = x.masked_fill(mask.unsqueeze(-1), 0)
-        x, _ = self.slf_attn(x, mask=slf_attn_mask)
-        # fc
-        x = self.fc(x)
-        # temoral average pooling
-        w = self.temporal_avg_pool(x, mask=mask)
-
-        return w
 
 
 class Prenet(nn.Module):

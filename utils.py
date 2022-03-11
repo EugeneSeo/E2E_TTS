@@ -20,6 +20,16 @@ def process_meta(data_path, meta_path):
             sid.append(s)
         return name, text, sid
 
+def process_meta_ljspeech(data_path, meta_path):
+    with open(meta_path, "r", encoding="utf-8") as f:
+        phone = []
+        name = []
+        for line in f.readlines():
+            n, p = line.strip('\n').split('|')
+            name.append(n)
+            phone.append(p)
+        return name, phone
+
 def plot_data(data, titles=None, filename=None):
     fig, axes = plt.subplots(len(data)//2, 2, squeeze=False)
     mel_max = max(data[0].shape[1], data[2].shape[1])

@@ -48,10 +48,14 @@ def remove_outlier(x, p_bottom: int = 25, p_top: int = 75):
         if is_outlier(value, p_bottom, p_top):
             indices_of_outliers.append(ind)
 
-    x[indices_of_outliers] = 0.0
-    x[indices_of_outliers] = np.max(x)
-    # return
-    # new!
+    # x[indices_of_outliers] = 0.0
+    # x[indices_of_outliers] = np.max(x)    
+    for idx in indices_of_outliers:
+        x[idx] = 0.0
+    max_x = np.max(x)
+    for idx in indices_of_outliers:
+        x[idx] = max_x
+
     return x
 
     

@@ -1,5 +1,5 @@
-import audio as Audio
-from text import _clean_text
+import StyleSpeech.audio as Audio
+from StyleSpeech.text import _clean_text
 import numpy as np
 import librosa
 import os
@@ -8,7 +8,7 @@ from scipy.io.wavfile import write
 from joblib import Parallel, delayed
 import tgt
 import pyworld as pw
-from preprocessors.utils import remove_outlier, get_alignment, average_by_duration
+from StyleSpeech.preprocessors.utils import remove_outlier, get_alignment, average_by_duration
 from scipy.interpolate import interp1d
 import json
 
@@ -77,31 +77,42 @@ class Preprocessor:
 
         self.max_seq_len = config["max_seq_len"]
 
+        # self.STFT = Audio.stft.TacotronSTFT(
+        #     config["preprocessing"]["stft"]["filter_length"],
+        #     config["preprocessing"]["stft"]["hop_length"],
+        #     config["preprocessing"]["stft"]["win_length"],
+        #     config["preprocessing"]["mel"]["n_mel_channels"],
+        #     config["preprocessing"]["audio"]["sampling_rate"],
+        #     config["preprocessing"]["mel"]["mel_fmin"],
+        #     config["preprocessing"]["mel"]["mel_fmax"],
+        # )
         self.STFT = Audio.stft.TacotronSTFT(
-            config["preprocessing"]["stft"]["filter_length"],
-            config["preprocessing"]["stft"]["hop_length"],
-            config["preprocessing"]["stft"]["win_length"],
-            config["preprocessing"]["mel"]["n_mel_channels"],
-            config["preprocessing"]["audio"]["sampling_rate"],
-            config["preprocessing"]["mel"]["mel_fmin"],
-            config["preprocessing"]["mel"]["mel_fmax"],
+            config["filter_length"],
+            config["hop_length"],
+            config["win_length"],
+            config["n_mel_channels"],
+            config["sampling_rate"],
+            config["mel_fmin"],
+            config["mel_fmax"],
         )
 
     def write_metadata(self, data_dir, out_dir):
-        metadata = os.path.join(out_dir, 'metadata.csv')
+        metadata = os.path.join(out_dir, 'metadata_new.csv')
         if not os.path.exists(metadata):
             wav_fname_list = [str(f) for f in list(Path(data_dir).rglob('*.wav'))]
             lines = []
             for wav_fname in wav_fname_list:
                 basename = wav_fname.split('/')[-1].replace('.wav', '')
-                sid = wav_fname.split('/')[-2]
-                assert sid in basename
+                # sid = wav_fname.split('/')[-2]
+                # assert sid in basename
                 txt_fname = wav_fname.replace('.wav', '.txt')
                 with open(txt_fname, 'r') as f:
                     text = f.readline().strip()
                     f.close()
-                lines.append('{}|{}|{}'.format(basename, text, sid))
-            with open(metadata, 'wt') as f:
+                # lines.append('{}|{}|{}'.format(basename, text, sid))
+                lines.append('{}|{}'.format(basename, text))
+            # os.makedirs(metadata)
+            with open(metadata, 'at') as f:
                 f.writelines('\n'.join(lines))
                 f.close()
 
@@ -110,7 +121,7 @@ class Preprocessor:
         f0 = list()
         energy = list()
         n_frames = 0
-        with open(os.path.join(out_dir, 'metadata.csv'), encoding='utf-8') as f:
+        with open(os.path.join(out_dir, 'metadata_new.csv'), encoding='utf-8') as f:
             basenames = []
             for line in f:
                 parts = line.strip().split('|')
@@ -120,13 +131,15 @@ class Preprocessor:
         results = Parallel(n_jobs=10, verbose=1)(
                 delayed(self.process_utterance)(data_dir, out_dir, basename) for basename in basenames
             )
+        
         results = [ r for r in results if r is not None ]
         for r in results:
-            datas.extend(r[0])
+            datas.append(r[0])
             f0.extend(r[1])
             energy.extend(r[2])
             n_frames += r[3]
 
+        # print(f0)
         f0 = remove_outlier(f0)
         energy = remove_outlier(energy)
 
@@ -144,7 +157,7 @@ class Preprocessor:
             "total_time": total_time,
             "n_frames": n_frames,
             "f0_stat": [f0_max, f0_min, f0_mean, f0_std],
-            "energy_state": [energy_max, energy_min, energy_mean, energy_std]
+            "energy_stat": [energy_max, energy_min, energy_mean, energy_std]
         }
         with open(os.path.join(out_dir, 'stats.json'), 'w') as f:
             json.dump(f_json, f)
@@ -152,10 +165,10 @@ class Preprocessor:
         return datas
 
 
-    def process_utterance(self, in_dir, out_dir, basename, dataset='libritts'):
-        sid = basename.split('_')[0]
-        wav_path = os.path.join(in_dir, 'wav{}', sid, '{}.wav'.format(self.sampling_rate//1000, basename))
-        tg_path = os.path.join(out_dir, 'TextGrid', sid, '{}.TextGrid'.format(basename)) 
+    def process_utterance(self, in_dir, out_dir, basename, dataset='ljspeech'):
+        # sid = basename.split('_')[0]
+        wav_path = os.path.join(in_dir, 'wavs', '{}.wav'.format(basename))
+        tg_path = os.path.join(out_dir, 'TextGrid', '{}.TextGrid'.format(basename)) 
 
         if not os.path.exists(wav_path) or not os.path.exists(tg_path):
             return None
@@ -203,7 +216,7 @@ class Preprocessor:
         # Energy phoneme-level average
         energy = average_by_duration(np.array(energy), np.array(duration))
 
-        if len([f for f in f0 if f != 0]) ==0 or len([e for e in energy if e != 0]):
+        if (len([f for f in f0 if f != 0]) == 0) or (len([e for e in energy if e != 0]) == 0):
             return None
 
         # Save alignment
@@ -222,4 +235,4 @@ class Preprocessor:
         mel_filename = '{}-mel-{}.npy'.format(dataset, basename)
         np.save(os.path.join(out_dir, 'mel', mel_filename), mel_spectrogram.T, allow_pickle=False)
 
-        return '|'.join([basename, text, sid]), list(f0), list(energy), mel_spectrogram.shape[1]
+        return '|'.join([basename, text]), list(f0), list(energy), mel_spectrogram.shape[0]

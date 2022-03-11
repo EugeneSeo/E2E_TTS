@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 from hifi_gan.env import AttrDict, build_env
 from hifi_gan.meldataset import mel_spectrogram
-from hifi_gan.models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
+from hifi_gan.models import Generator_interpolation, Generator_intpol2, Generator_intpol3, Generator_intpol4, Generator_intpol5, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
     discriminator_loss
 from hifi_gan.utils import load_checkpoint
 torch.backends.cudnn.benchmark = True
@@ -32,11 +32,10 @@ def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     sid, text, mel_target, mel_start_idx, wav, \
                 D, log_D, f0, energy, \
                 src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch, device)
-    # mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _ = SS(
-    #             device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
-    mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, _, _ = SS(
+    
+    mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = SS(
                 device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
-    wav_output = G(torch.transpose(mel_output, 1, 2))
+    wav_output = G(acoustic_adaptor_output, hidden_output)
     wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                                         h.fmin, h.fmax_for_loss)
     mel_crop = torch.transpose(mel_target, 1, 2)
@@ -66,7 +65,7 @@ def inference_f(a, h, c, max_inf=None):
 
     os.makedirs(a.save_path, exist_ok=True)
     device =  torch.device('cuda:{:d}'.format(0))
-    generator = Generator(h).to(device)
+    generator = Generator_intpol4(h).to(device)
     stylespeech = StyleSpeech(c).to(device)
 
     generator = torch.nn.DataParallel(generator, [0])
@@ -89,32 +88,6 @@ def inference_f(a, h, c, max_inf=None):
         create_wav(a, h, c, generator, stylespeech, batch, exp_code, basename)
         count += 1
 
-def inference(a, h, c, max_inf=None):
-    validation_loader = prepare_dataloader(a.data_path, "val.txt", shuffle=False, batch_size=1, val=True) 
-    count = 0
-
-    os.makedirs(a.save_path, exist_ok=True)
-    device = torch.device('cuda:{:d}'.format(0))
-
-    generator = Generator(h).to(device)
-    stylespeech = StyleSpeech(c).to(device)
-
-    stylespeech.load_state_dict(torch.load("./cp_StyleSpeech/stylespeech.pth.tar")['model'])
-    state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
-    generator.load_state_dict(state_dict_g['generator'])
-
-    generator.eval()
-    stylespeech.eval()
-
-    exp_code = "no_finetuning"
-    a.checkpoint_step = "0"
-    for j, batch in enumerate(validation_loader):
-        if (count == max_inf):
-            break
-        basename = batch["id"][0]
-        create_wav(a, h, c, generator, stylespeech, batch, exp_code, basename)
-        break
-        count += 1
 
 def main():
     parser = argparse.ArgumentParser()
@@ -127,7 +100,6 @@ def main():
     parser.add_argument('--config', default='./hifi_gan/config_v1.json')
     parser.add_argument('--config_ss', default='./StyleSpeech/configs/config.json') # Configurations for StyleSpeech model
     parser.add_argument('--max_inf', default=10, type=int)
-    parser.add_argument('--finetuning', default="Yes") # No or Yes
 
     a = parser.parse_args()
     with open(a.config) as f:
@@ -143,10 +115,7 @@ def main():
     gpu_ids = [0]
     h.num_gpus = len(gpu_ids)
 
-    if a.finetuning == "Yes":
-        inference_f(a, h, config, a.max_inf)
-    else: # "No"
-        inference(a, h, config, a.max_inf)
+    inference_f(a, h, config, a.max_inf)
 
 if __name__ == '__main__':
     main()

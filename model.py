@@ -31,21 +31,58 @@ def parse_batch(batch, device):
             D, log_D, f0, energy, \
             src_len, mel_len, max_src_len, max_mel_len
 
+def parse_batch_LJSpeech(batch, device):
+    sid = torch.from_numpy(batch["sid"]).long().to(device)
+    text = torch.from_numpy(batch["text"]).long().to(device)
+    mel_target = torch.from_numpy(batch["mel_target"]).float().to(device)
+    D = torch.from_numpy(batch["D"]).long().to(device)
+    log_D = torch.from_numpy(batch["log_D"]).float().to(device)
+    f0 = torch.from_numpy(batch["f0"]).float().to(device)
+    energy = torch.from_numpy(batch["energy"]).float().to(device)
+    src_len = torch.from_numpy(batch["src_len"]).long().to(device)
+    mel_len = torch.from_numpy(batch["mel_len"]).long().to(device)
+    max_src_len = np.max(batch["src_len"]).astype(np.int32)
+    max_mel_len = np.max(batch["mel_len"]).astype(np.int32)
+    ##############################################################
+    mel_start_idx = torch.Tensor(batch["mel_start_idx"]).int().to(device)
+    wav = torch.from_numpy(np.array(batch["wav"], dtype=np.float32)).to(device)
+    ##############################################################
+    return sid, text, mel_target, mel_start_idx, wav, \
+            D, log_D, f0, energy, \
+            src_len, mel_len, max_src_len, max_mel_len
+
 def D_step(mpd, msd, optim_d, y, y_g_hat, scaler=None, retain_graph=True):
     optim_d.zero_grad()
 
     if scaler is None:
+        y = y.requires_grad_(True)
         # MPD
         y_df_hat_r, y_df_hat_g, _, _ = mpd(y, y_g_hat)
         loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(y_df_hat_r, y_df_hat_g)
+        ######
+        r1_grads_mpd = torch.autograd.grad(outputs=[temp.sum() for temp in y_df_hat_r], inputs=[y], 
+                                    create_graph=True, retain_graph=True, only_inputs=True)[0]
+        r1_penalty_mpd = (r1_grads_mpd.reshape(r1_grads_mpd.shape[0], -1).norm(2, dim=1) ** 2).sum() * 0.5
+        ######
+        
         # MSD
         y_ds_hat_r, y_ds_hat_g, _, _ = msd(y, y_g_hat)
         loss_disc_s, losses_disc_s_r, losses_disc_s_g = discriminator_loss(y_ds_hat_r, y_ds_hat_g)
+        ######
+        r1_grads_msd = torch.autograd.grad(outputs=[temp.sum() for temp in y_ds_hat_r], inputs=[y], 
+                                    create_graph=True, retain_graph=True, only_inputs=True)[0]
+        r1_penalty_msd = (r1_grads_msd.reshape(r1_grads_msd.shape[0], -1).norm(2, dim=1) ** 2).sum() * 0.5
+        ######
 
-        loss_disc_all = loss_disc_s + loss_disc_f
+        loss_disc_all = loss_disc_s + loss_disc_f + (r1_penalty_mpd + r1_penalty_msd) * 1
+        # loss_disc_all = loss_disc_f + r1_penalty_mpd
+
+        # new line
+        rtn_list = [loss_disc_all.item(), loss_disc_s.item(), loss_disc_f.item(), r1_penalty_mpd.item(), r1_penalty_msd.item()]
+        # rtn_list = [loss_disc_all.item(), 0, loss_disc_f.item(), r1_penalty_mpd.item(), 0]
         loss_disc_all.backward(retain_graph=retain_graph)
         optim_d.step()
-        return loss_disc_all
+        return loss_disc_all, rtn_list
     
     with autocast():
         # MPD
@@ -57,10 +94,12 @@ def D_step(mpd, msd, optim_d, y, y_g_hat, scaler=None, retain_graph=True):
 
         loss_disc_all = loss_disc_s + loss_disc_f
         
+    # new line
+    rtn_list = [loss_disc_all.item(), loss_disc_s.item(), loss_disc_f.item()]
     scaler.scale(loss_disc_all).backward(retain_graph=retain_graph)
     scaler.step(optim_d)  
 
-    return loss_disc_all
+    return loss_disc_all, rtn_list
 
 def G_step(mpd, msd, optim_g, y, y_mel, y_g_hat, y_g_hat_mel, \
             loss_ss, mel_output, mel_target, log_duration_output, log_D, \
@@ -81,16 +120,23 @@ def G_step(mpd, msd, optim_g, y, y_mel, y_g_hat, y_g_hat_mel, \
         
         if G_only:
             loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel * lmel_hifi
+            total_loss = None
         else:
             mel_loss, d_loss, f_loss, e_loss = loss_ss(mel_output, mel_target, 
                     log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len)
             # Total loss
             total_loss = mel_loss + d_loss + f_loss + e_loss
             loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel * lmel_hifi + total_loss * lmel_ss 
+            # loss_gen_all = loss_gen_f + loss_fm_f + loss_mel * lmel_hifi + total_loss * lmel_ss 
         
+        # new line
+        rtn_list = [loss_gen_all.item(), loss_gen_s.item(), loss_gen_f.item(), loss_fm_s.item(), 
+                    loss_fm_f.item(), loss_mel.item() * lmel_hifi, total_loss.item() * lmel_ss if total_loss else 0]
+        # rtn_list = [loss_gen_all.item(), 0, loss_gen_f.item(), 0, 
+        #             loss_fm_f.item(), loss_mel.item() * lmel_hifi, total_loss.item() * lmel_ss if total_loss else 0]
         loss_gen_all.backward(retain_graph=retain_graph)
         optim_g.step()
-        return loss_gen_all
+        return loss_gen_all, rtn_list
     
     with autocast():
         # L1 Mel-Spectrogram Loss
@@ -105,17 +151,21 @@ def G_step(mpd, msd, optim_g, y, y_mel, y_g_hat, y_g_hat_mel, \
         
         if G_only:
             loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel * lmel_hifi
+            total_loss = None
         else:
             mel_loss, d_loss, f_loss, e_loss = loss_ss(mel_output, mel_target, 
                     log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len)
             # Total loss
             total_loss = mel_loss + d_loss + f_loss + e_loss    
             loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel * lmel_hifi + total_loss * lmel_ss
-
+    
+    # new line
+    rtn_list = [loss_gen_all.item(), loss_gen_s.item(), loss_gen_f.item(), loss_fm_s.item(), 
+                loss_fm_f.item(), loss_mel.item(), total_loss.item() if total_loss else 0]
     scaler.scale(loss_gen_all).backward(retain_graph=retain_graph)
     scaler.step(optim_g)   
 
-    return loss_gen_all
+    return loss_gen_all, rtn_list
 
 def SS_step(loss_ss, mel_output, mel_target, log_duration_output, log_D, \
             f0_output, f0, energy_output, energy, src_len, mel_len, scaler=None):
