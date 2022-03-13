@@ -53,11 +53,11 @@ def plot_data(data, titles=None, filename=None):
     plt.savefig(filename, dpi=200)
     plt.close()
 
-def get_mask_from_lengths(lengths, device, max_len=None):
+def get_mask_from_lengths(lengths, max_len=None):
     batch_size = lengths.shape[0]
     if max_len is None:
         max_len = torch.max(lengths).item()
     
-    ids = torch.arange(0, max_len).unsqueeze(0).expand(batch_size, -1).to(device)
+    ids = torch.arange(0, max_len).unsqueeze(0).expand(batch_size, -1).cuda()
     mask = (ids >= lengths.unsqueeze(1).expand(-1, max_len))
     return mask
