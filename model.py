@@ -11,21 +11,21 @@ from models.StyleSpeech import StyleSpeech
 from models.Loss import StyleSpeechLoss
 from torch.cuda.amp import autocast, GradScaler
 
-def parse_batch(batch, device):
-    sid = torch.from_numpy(batch["sid"]).long().to(device)
-    text = torch.from_numpy(batch["text"]).long().to(device)
-    mel_target = torch.from_numpy(batch["mel_target"]).float().to(device)
-    D = torch.from_numpy(batch["D"]).long().to(device)
-    log_D = torch.from_numpy(batch["log_D"]).float().to(device)
-    f0 = torch.from_numpy(batch["f0"]).float().to(device)
-    energy = torch.from_numpy(batch["energy"]).float().to(device)
-    src_len = torch.from_numpy(batch["src_len"]).long().to(device)
-    mel_len = torch.from_numpy(batch["mel_len"]).long().to(device)
+def parse_batch(batch):
+    sid = torch.from_numpy(batch["sid"]).long().cuda()
+    text = torch.from_numpy(batch["text"]).long().cuda()
+    mel_target = torch.from_numpy(batch["mel_target"]).float().cuda()
+    D = torch.from_numpy(batch["D"]).long().cuda()
+    log_D = torch.from_numpy(batch["log_D"]).float().cuda()
+    f0 = torch.from_numpy(batch["f0"]).float().cuda()
+    energy = torch.from_numpy(batch["energy"]).float().cuda()
+    src_len = torch.from_numpy(batch["src_len"]).long().cuda()
+    mel_len = torch.from_numpy(batch["mel_len"]).long().cuda()
     max_src_len = np.max(batch["src_len"]).astype(np.int32)
     max_mel_len = np.max(batch["mel_len"]).astype(np.int32)
     ##############################################################
-    mel_start_idx = torch.Tensor(batch["mel_start_idx"]).int().to(device)
-    wav = torch.from_numpy(np.array(batch["wav"])).to(device)
+    mel_start_idx = torch.Tensor(batch["mel_start_idx"]).int().cuda()
+    wav = torch.from_numpy(np.array(batch["wav"])).cuda()
     ##############################################################
     return sid, text, mel_target, mel_start_idx, wav, \
             D, log_D, f0, energy, \

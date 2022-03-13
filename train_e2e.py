@@ -17,27 +17,45 @@ import torch.utils.data.distributed
 
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
-from hifi_gan.env import AttrDict, build_env
-from hifi_gan.meldataset import mel_spectrogram
-from hifi_gan.models import *
-from hifi_gan.utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
-torch.backends.cudnn.benchmark = True
+from env_hifi import AttrDict, build_env
+from meldataset_hifi import mel_spectrogram
+from models.Hifigan import *
+from utils_hifi import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
+# torch.backends.cudnn.benchmark = True
 ##### StyleSpeech #####
-from StyleSpeech.models.StyleSpeech import StyleSpeech
-from StyleSpeech.models.Loss import StyleSpeechLoss
-from StyleSpeech.optimizer import ScheduledOptim
-from StyleSpeech.evaluate import evaluate
-import StyleSpeech.utils as utils_ss
-torch.backends.cudnn.enabled = True
+from models.StyleSpeech import StyleSpeech
+from models.Loss import StyleSpeechLoss
+from optimizer_stylespeech import ScheduledOptim
+from evaluate_stylespeech import evaluate
+import utils_stylespeech as utils_ss
+# torch.backends.cudnn.enabled = True
 ##### E2E_TTS #####
 from model import D_step, G_step, SS_step, parse_batch, WBLogger
 from dataloader import prepare_dataloader
 from torch.cuda.amp import autocast, GradScaler
 from utils import plot_data
 #--------------------------------------------------------------------#
+from CVC_loss import *
 
 def cleanup():
     dist.destroy_process_group()
+
+
+def load_checkpoint(checkpoint_path, model, name, rank, distributed=False):
+    assert os.path.isfile(checkpoint_path)
+    print("Starting model from checkpoint '{}'".format(checkpoint_path))
+    checkpoint_dict = torch.load(checkpoint_path, map_location='cuda:{}'.format(rank))
+    if name in checkpoint_dict:
+        if distributed:
+            state_dict = {}
+            for k,v in checkpoint_dict[name].items():
+                state_dict['module.{}'.format(k)] = v
+            model.load_state_dict(state_dict)
+        else:
+            model.load_state_dict(checkpoint_dict[name])
+        model.load_state_dict(checkpoint_dict[name])
+        print('Model is loaded!') 
+    return model
 
 def train(rank, args, h, c, gpu_ids):
 
@@ -48,13 +66,13 @@ def train(rank, args, h, c, gpu_ids):
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=rank)
     device = torch.device('cuda:{:d}'.format(rank))
 
-
     # Define model
     generator = Generator_intpol4(h).cuda()
     stylespeech = StyleSpeech(c).cuda()
     mpd = MultiPeriodDiscriminator().cuda()
     msd = MultiScaleDiscriminator().cuda()
     loss_ss = StyleSpeechLoss()
+    loss_cvc = CVCLoss()
 
     if args.freeze_ss:
         for param in stylespeech.parameters():
@@ -79,7 +97,7 @@ def train(rank, args, h, c, gpu_ids):
     mpd_without_ddp = mpd
     msd_without_ddp = msd
     if args.distributed:
-        c.batch_size = 52 // ngpus
+        c.batch_size = 2 // ngpus
         generator = torch.nn.parallel.DistributedDataParallel(generator, device_ids=[rank])
         generator_without_ddp = generator.module
         stylespeech = nn.parallel.DistributedDataParallel(stylespeech, device_ids=[rank])
@@ -103,13 +121,12 @@ def train(rank, args, h, c, gpu_ids):
         last_epoch = -1
 
     else:
-        state_dict_ss = load_checkpoint(cp_ss, device)
-        state_dict_g = load_checkpoint(cp_g, device)
-        state_dict_do = load_checkpoint(cp_do, device)
-        stylespeech.load_state_dict(state_dict_ss['stylespeech'])
-        generator.load_state_dict(state_dict_g['generator'])
-        mpd.load_state_dict(state_dict_do['mpd'])
-        msd.load_state_dict(state_dict_do['msd'])
+        load_checkpoint(cp_ss, stylespeech, "stylespeech", rank, args.distributed)
+        load_checkpoint(cp_g, generator, "generator", rank, args.distributed)
+        load_checkpoint(cp_do, mpd, "mpd", rank, args.distributed)
+        load_checkpoint(cp_do, msd, "msd", rank, args.distributed)
+        
+        state_dict_do = torch.load(cp_do, map_location='cuda:{}'.format(rank))
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
 
@@ -216,14 +233,14 @@ def train(rank, args, h, c, gpu_ids):
             msd.requires_grad_(False)
             generator.requires_grad_(True)
             if (args.optim_g == "G_and_SS"):
-                loss_gen_all, loss_gen_list = G_step(mpd, msd, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
+                loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
                                                 loss_ss, mel_output, mel_target, 
                                                 log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
                                                 scaler=scaler, retain_graph=False, G_only=False, lmel_hifi=args.lmel_hifi, lmel_ss=args.lmel_ss)
                 if scaler != None:
                     scaler.update()
             else: 
-                loss_gen_all, loss_gen_list = G_step(mpd, msd, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
+                loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
                                                 loss_ss, mel_output, mel_target, 
                                                 log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
                                                 scaler=scaler, retain_graph=True, G_only=True, lmel_hifi=args.lmel_hifi, lmel_ss=args.lmel_ss)
@@ -269,13 +286,13 @@ def train(rank, args, h, c, gpu_ids):
                     print('Checkpointing')
                     checkpoint_path = "{}/ss_{:08d}".format(args.checkpoint_path, steps)
                     save_checkpoint(checkpoint_path,
-                                    {'stylespeech': stylespeech.state_dict()})
+                                    {'stylespeech': stylespeech_without_ddp.state_dict()})
                     checkpoint_path = "{}/g_{:08d}".format(args.checkpoint_path, steps)
                     save_checkpoint(checkpoint_path,
-                                    {'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()})
+                                    {'generator': generator_without_ddp.state_dict()})
                     checkpoint_path = "{}/do_{:08d}".format(args.checkpoint_path, steps)
-                    save_dict = {'mpd': (mpd.module if h.num_gpus > 1 else mpd).state_dict(),
-                                     'msd': (msd.module if h.num_gpus > 1 else msd).state_dict(),
+                    save_dict = {'mpd': mpd_without_ddp.state_dict(),
+                                     'msd': msd_without_ddp.state_dict(),
                                      'optim_g': optim_g.state_dict(), 'optim_d': optim_d.state_dict(), 
                                      'steps': steps, 'epoch': epoch}
                     if (args.optim_g == "G_only"):
@@ -333,8 +350,8 @@ def train(rank, args, h, c, gpu_ids):
                     stylespeech.train()
                     generator.train()
             
-            # cleanup()
-            # return
+            cleanup()
+            return
 
             steps += 1
 
@@ -356,14 +373,14 @@ def main():
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
     parser.add_argument('--save_path', default='exp_default')
     parser.add_argument('--checkpoint_path', default='cp_default')
-    parser.add_argument('--config', default='./hifi_gan/config_v1.json')
+    parser.add_argument('--config', default='./configs/config_v1.json')
     parser.add_argument('--training_epochs', default=1, type=int)
     parser.add_argument('--stdout_interval', default=100, type=int)
     parser.add_argument('--checkpoint_interval', default=1000, type=int)
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=1000, type=int)
     
-    parser.add_argument('--config_ss', default='./StyleSpeech/configs/config.json') # Configurations for StyleSpeech model
+    parser.add_argument('--config_ss', default='./configs/config.json') # Configurations for StyleSpeech model
     parser.add_argument('--optim_g', default='G_and_SS') # "G_and_SS" or "G_only"
     parser.add_argument('--use_scaler', default=False)
     parser.add_argument('--freeze_ss', default=False)
