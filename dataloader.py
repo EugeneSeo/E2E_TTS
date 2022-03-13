@@ -3,8 +3,7 @@ import numpy as np
 import json
 import os
 from text import text_to_sequence
-from utils_stylespeech import pad_1D, pad_2D
-from utils import process_meta
+from utils import process_meta, pad_1D, pad_2D
 import librosa
 import tgt
 from preprocessors.utils import get_alignment

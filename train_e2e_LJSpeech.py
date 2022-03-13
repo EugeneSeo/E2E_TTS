@@ -17,23 +17,18 @@ import torch.utils.data.distributed
 
 from env_hifi import AttrDict, build_env
 from meldataset_hifi import mel_spectrogram
-from models.Hifigan import Generator_interpolation, Generator_intpol5, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
-    discriminator_loss
-from utils_hifi import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
-# torch.backends.cudnn.benchmark = True
+from models.Hifigan import *
+
 ##### StyleSpeech #####
 from models.Speech import Speech
 from models.Loss import StyleSpeechLoss
 from optimizer_stylespeech import ScheduledOptim
-from evaluate_stylespeech import evaluate
-import utils_stylespeech as utils_ss
-# torch.backends.cudnn.enabled = True
+
 ##### E2E_TTS #####
-from model import D_step, G_step, SS_step
-from model import parse_batch_LJSpeech as parse_batch
+from model import D_step, G_step, SS_step, parse_batch_LJSpeech as parse_batch
 from dataloader_LJSpeech import prepare_dataloader
 from torch.cuda.amp import autocast, GradScaler
-from utils import plot_data
+import utils
 #--------------------------------------------------------------------#
 from CVC_loss import *
 
@@ -77,8 +72,8 @@ def train(rank, args, h, c, gpu_ids):
         for param in speech.parameters():
             param.requires_grad = False
     
-    num_param = utils_ss.get_param_num(generator) + utils_ss.get_param_num(speech) \
-                + utils_ss.get_param_num(msd) + utils_ss.get_param_num(mpd)
+    num_param = utils.get_param_num(generator) + utils.get_param_num(speech) \
+                + utils.get_param_num(msd) + utils.get_param_num(mpd)
 
     if rank == 0:
         os.makedirs(args.checkpoint_path, exist_ok=True)
@@ -87,9 +82,9 @@ def train(rank, args, h, c, gpu_ids):
         print("Model Has Been Defined")
 
     if os.path.isdir(args.checkpoint_path):
-        cp_ss = scan_checkpoint(args.checkpoint_path, 'ss_')
-        cp_g = scan_checkpoint(args.checkpoint_path, 'g_')
-        cp_do = scan_checkpoint(args.checkpoint_path, 'do_')
+        cp_ss = utils.scan_checkpoint(args.checkpoint_path, 'ss_')
+        cp_g = utils.scan_checkpoint(args.checkpoint_path, 'g_')
+        cp_do = utils.scan_checkpoint(args.checkpoint_path, 'do_')
 
     generator_without_ddp = generator
     speech_without_ddp = speech
@@ -283,10 +278,10 @@ def train(rank, args, h, c, gpu_ids):
                 if steps % args.checkpoint_interval == 0 and steps != 0:
                     print('Checkpointing')
                     checkpoint_path = "{}/ss_{:08d}".format(args.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path,
+                    utils.save_checkpoint(checkpoint_path,
                                     {'speech': speech_without_ddp.state_dict()})
                     checkpoint_path = "{}/g_{:08d}".format(args.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path,
+                    utils.save_checkpoint(checkpoint_path,
                                     {'generator': enerator_without_ddp.state_dict()})
                     checkpoint_path = "{}/do_{:08d}".format(args.checkpoint_path, steps)
                     save_dict = {'mpd': mpd_without_ddp.state_dict(),
@@ -295,7 +290,7 @@ def train(rank, args, h, c, gpu_ids):
                                      'steps': steps, 'epoch': epoch}
                     if (args.optim_g == "G_only"):
                         save_dict['optim_ss'] = optim_ss.state_dict()
-                    save_checkpoint(checkpoint_path, save_dict)
+                    utils.save_checkpoint(checkpoint_path, save_dict)
                     
 
                 # Tensorboard summary logging
@@ -335,7 +330,7 @@ def train(rank, args, h, c, gpu_ids):
                             wav_target_mel = mel_crop[0].detach().cpu()
                             wav_mel = wav_output_mel[0].detach().cpu()
                             # plotting
-                            plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
+                            utils.plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
                                 ['Synthesized Spectrogram', 'Swav', 'Ground-Truth Spectrogram', 'GTwav'], 
                                 filename=os.path.join(synth_path, 'step_{}.jpg'.format(steps)))
                             print("Synth spectrograms at step {}...\n".format(steps))
@@ -404,14 +399,14 @@ def main():
         data = f.read()
 
     json_config = json.loads(data)
-    h = AttrDict(json_config)
-    build_env(args.config, 'config.json', args.checkpoint_path)
+    h = utils.AttrDict(json_config)
+    utils.build_env(args.config, 'config.json', args.checkpoint_path)
 
     with open(args.config_ss) as f_ss:
         data_ss = f_ss.read()
     json_config_ss = json.loads(data_ss)
-    config = utils_ss.AttrDict(json_config_ss)
-    utils_ss.build_env(args.config_ss, 'config_ss.json', args.checkpoint_path)
+    config = utils.AttrDict(json_config_ss)
+    utils.build_env(args.config_ss, 'config_ss.json', args.checkpoint_path)
     
     # ngpus = torch.cuda.device_count()
     gpu_ids = [0,1]
