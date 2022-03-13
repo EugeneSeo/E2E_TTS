@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
-from utils import get_mask_from_lengths
+# from utils import get_mask_from_lengths, pad
+import utils
 from models.Modules import LinearNorm, ConvNorm, get_sinusoid_encoding_table
-import utils_stylespeech as utils
+# import utils_stylespeech as utils
 
 class VarianceAdaptor(nn.Module):
     """ Variance Adaptor """
@@ -54,14 +55,12 @@ class VarianceAdaptor(nn.Module):
         # Length regulate
         if duration_target is not None:
             output, pe, mel_len = self.length_regulator(x, duration_target, max_len)
-            # mel_mask = utils.get_mask_from_lengths(mel_len)
-            mel_mask = get_mask_from_lengths(mel_len)
+            mel_mask = utils.get_mask_from_lengths(mel_len)
         else:
             duration_rounded = torch.clamp(torch.round(torch.exp(log_duration_prediction)-1.0), min=0)            
             duration_rounded = duration_rounded.masked_fill(src_mask, 0).long()
             output, pe, mel_len = self.length_regulator(x, duration_rounded)
-            # mel_mask = utils.get_mask_from_lengths(mel_len)
-            mel_mask = get_mask_from_lengths(mel_len)
+            mel_mask = utils.get_mask_from_lengths(mel_len)
 
         # Phoneme-wise positional encoding
         output = output + pe
