@@ -364,7 +364,7 @@ def main():
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=1000, type=int)
     
-    parser.add_argument('--config_ss', default='./config.json') # Configurations for StyleSpeech model
+    parser.add_argument('--config_ss', default='./configs/config_LJSpeech.json') # Configurations for StyleSpeech model
     parser.add_argument('--optim_g', default='G_and_SS') # "G_and_SS" or "G_only"
     parser.add_argument('--use_scaler', default=False)
     parser.add_argument('--freeze_ss', default=False)
