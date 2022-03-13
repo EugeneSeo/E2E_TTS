@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
-from hifi_gan.models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
+from models_hifi import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
     discriminator_loss
-from StyleSpeech.models.StyleSpeech import StyleSpeech
-from StyleSpeech.models.Loss import StyleSpeechLoss
+from models.StyleSpeech import StyleSpeech
+from models.Loss import StyleSpeechLoss
 from torch.cuda.amp import autocast, GradScaler
 
 def parse_batch(batch, device):

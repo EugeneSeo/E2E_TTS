@@ -1,8 +1,10 @@
 import os
 import argparse
 import random
-import preprocessors.libritts as libritts
-
+import StyleSpeech.preprocessors.ljspeech as ljspeech
+import json
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,6,7"
 
 def make_train_files(out_dir, datas):
     random.shuffle(datas)
@@ -32,17 +34,27 @@ def make_folders(out_dir):
         os.makedirs(energy_out_dir, exist_ok=True)
 
 
-def main(data_dir, out_dir):
-    libritts.write_metadata(data_dir, out_dir)
+def main(data_dir, out_dir, config):
+    preprocessor = ljspeech.Preprocessor(config)
     make_folders(out_dir)
-    datas = libritts.build_from_path(data_dir, out_dir)
+    # preprocessor.write_metadata(data_dir, out_dir)
+    datas = preprocessor.build_from_path(data_dir, out_dir)
     make_train_files(out_dir, datas)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, default='dataset/')
-    parser.add_argument('--output_path', type=str, default='dataset/')
+    # parser.add_argument('--data_path', type=str, default='dataset/')
+    # parser.add_argument('--output_path', type=str, default='dataset/')
+    parser.add_argument('--data_path', type=str, default='/v9/dongchan/TTS/dataset/LJSpeech/')
+    parser.add_argument('--output_path', type=str, default='/v9/dongchan/TTS/dataset/LJSpeech/preprocessed/')
+    parser.add_argument('--config_ss', default='./config.json') # Configurations for Speech model
+    
     args = parser.parse_args()
 
-    main(args.data_path, args.output_path)
+    with open(args.config_ss) as f_ss:
+        data_ss = f_ss.read()
+    config = json.loads(data_ss)
+    # config = utils_ss.AttrDict(json_config_ss)
+
+    main(args.data_path, args.output_path, config)

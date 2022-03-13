@@ -1,5 +1,5 @@
 import torch
-from StyleSpeech.dataloader import prepare_dataloader
+from dataloader_stylespeech import prepare_dataloader
 
 
 def evaluate(args, model, step):    

@@ -2,12 +2,12 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
 import os
-from StyleSpeech.text import text_to_sequence
-from StyleSpeech.utils import pad_1D, pad_2D
+from text import text_to_sequence
+from utils_stylespeech import pad_1D, pad_2D
 from utils import process_meta_ljspeech as process_meta
 import librosa
 import tgt
-from StyleSpeech.preprocessors.utils import get_alignment
+from preprocessors.utils import get_alignment
 
 
 

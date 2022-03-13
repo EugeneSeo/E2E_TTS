@@ -15,18 +15,18 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch.utils.data.distributed
 
-from hifi_gan.env import AttrDict, build_env
-from hifi_gan.meldataset import mel_spectrogram
-from hifi_gan.models import Generator_interpolation, Generator_intpol5, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
+from env_hifi import AttrDict, build_env
+from meldataset_hifi import mel_spectrogram
+from models.Hifigan import Generator_interpolation, Generator_intpol5, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
     discriminator_loss
-from hifi_gan.utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
+from utils_hifi import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
 # torch.backends.cudnn.benchmark = True
 ##### StyleSpeech #####
-from StyleSpeech.models.Speech import Speech
-from StyleSpeech.models.Loss import StyleSpeechLoss
-from StyleSpeech.optimizer import ScheduledOptim
-from StyleSpeech.evaluate import evaluate
-import StyleSpeech.utils as utils_ss
+from models.Speech import Speech
+from models.Loss import StyleSpeechLoss
+from optimizer_stylespeech import ScheduledOptim
+from evaluate_stylespeech import evaluate
+import utils_stylespeech as utils_ss
 # torch.backends.cudnn.enabled = True
 ##### E2E_TTS #####
 from model import D_step, G_step, SS_step
@@ -39,6 +39,22 @@ from CVC_loss import *
 
 def cleanup():
     dist.destroy_process_group()
+
+def load_checkpoint(checkpoint_path, model, name, rank, distributed=False):
+    assert os.path.isfile(checkpoint_path)
+    print("Starting model from checkpoint '{}'".format(checkpoint_path))
+    checkpoint_dict = torch.load(checkpoint_path, map_location='cuda:{}'.format(rank))
+    if name in checkpoint_dict:
+        if distributed:
+            state_dict = {}
+            for k,v in checkpoint_dict[name].items():
+                state_dict['module.{}'.format(k)] = v
+            model.load_state_dict(state_dict)
+        else:
+            model.load_state_dict(checkpoint_dict[name])
+        model.load_state_dict(checkpoint_dict[name])
+        print('Model is loaded!') 
+    return model
 
 def train(rank, args, h, c, gpu_ids):
 
@@ -80,7 +96,7 @@ def train(rank, args, h, c, gpu_ids):
     mpd_without_ddp = mpd
     msd_without_ddp = msd
     if args.distributed:
-        c.batch_size = 52 // ngpus
+        c.batch_size = 2 // ngpus
         generator = torch.nn.parallel.DistributedDataParallel(generator, device_ids=[rank])
         generator_without_ddp = generator.module
         speech = nn.parallel.DistributedDataParallel(speech, device_ids=[rank])
@@ -104,13 +120,12 @@ def train(rank, args, h, c, gpu_ids):
         last_epoch = -1
 
     else:
-        state_dict_ss = load_checkpoint(cp_ss, device)
-        state_dict_g = load_checkpoint(cp_g, device)
-        state_dict_do = load_checkpoint(cp_do, device)
-        speech.load_state_dict(state_dict_ss['speech'])
-        generator.load_state_dict(state_dict_g['generator'])
-        mpd.load_state_dict(state_dict_do['mpd'])
-        msd.load_state_dict(state_dict_do['msd'])
+        load_checkpoint(cp_ss, speech, "speech", rank, args.distributed)
+        load_checkpoint(cp_g, generator, "generator", rank, args.distributed)
+        load_checkpoint(cp_do, mpd, "mpd", rank, args.distributed)
+        load_checkpoint(cp_do, msd, "msd", rank, args.distributed)
+        
+        state_dict_do = torch.load(cp_do, map_location='cuda:{}'.format(rank))
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
 
@@ -269,13 +284,13 @@ def train(rank, args, h, c, gpu_ids):
                     print('Checkpointing')
                     checkpoint_path = "{}/ss_{:08d}".format(args.checkpoint_path, steps)
                     save_checkpoint(checkpoint_path,
-                                    {'speech': speech.state_dict()})
+                                    {'speech': speech_without_ddp.state_dict()})
                     checkpoint_path = "{}/g_{:08d}".format(args.checkpoint_path, steps)
                     save_checkpoint(checkpoint_path,
-                                    {'generator': (generator.module if args.ngpus > 1 else generator).state_dict()})
+                                    {'generator': enerator_without_ddp.state_dict()})
                     checkpoint_path = "{}/do_{:08d}".format(args.checkpoint_path, steps)
-                    save_dict = {'mpd': (mpd.module if args.ngpus > 1 else mpd).state_dict(),
-                                     'msd': (msd.module if args.ngpus > 1 else msd).state_dict(),
+                    save_dict = {'mpd': mpd_without_ddp.state_dict(),
+                                     'msd': msd_without_ddp.state_dict(),
                                      'optim_g': optim_g.state_dict(), 'optim_d': optim_d.state_dict(), 
                                      'steps': steps, 'epoch': epoch}
                     if (args.optim_g == "G_only"):
@@ -333,8 +348,8 @@ def train(rank, args, h, c, gpu_ids):
                     speech.train()
                     generator.train()
             
-            # cleanup()
-            # return
+            cleanup()
+            return
 
             steps += 1
 
@@ -356,7 +371,7 @@ def main():
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LJSpeech/preprocessed')
     parser.add_argument('--save_path', default='exp_default')
     parser.add_argument('--checkpoint_path', default='cp_default')
-    parser.add_argument('--config', default='./hifi_gan/config_ljspeech.json')
+    parser.add_argument('--config', default='./configs/config_ljspeech.json')
     parser.add_argument('--training_epochs', default=1, type=int)
     parser.add_argument('--stdout_interval', default=100, type=int)
     parser.add_argument('--checkpoint_interval', default=1000, type=int)

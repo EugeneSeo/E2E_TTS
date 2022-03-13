@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from StyleSpeech.text.symbols import symbols
-import StyleSpeech.models.Constants as Constants
-from StyleSpeech.models.Modules import Mish, LinearNorm, ConvNorm, Conv1dGLU, \
+from text.symbols import symbols
+import models.Constants as Constants
+from models.Modules import Mish, LinearNorm, ConvNorm, Conv1dGLU, \
                     MultiHeadAttention, StyleAdaptiveLayerNorm, get_sinusoid_encoding_table
-from StyleSpeech.models.VarianceAdaptor import VarianceAdaptor
-from StyleSpeech.models.Loss import StyleSpeechLoss
+from models.VarianceAdaptor import VarianceAdaptor
+from models.Loss import StyleSpeechLoss
 from utils import get_mask_from_lengths
 
 
@@ -33,23 +33,23 @@ class Speech(nn.Module):
         max_mel_len = np.max(batch["mel_len"]).astype(np.int32)
         return sid, text, mel_target, D, log_D, f0, energy, src_len, mel_len, max_src_len, max_mel_len
 
-    def forward(self, device, src_seq, src_len, mel_target, mel_len=None, 
+    def forward(self, src_seq, src_len, mel_target, mel_len=None, 
                     d_target=None, p_target=None, e_target=None, max_src_len=None, max_mel_len=None):
-        src_mask = get_mask_from_lengths(src_len, device, max_src_len)
-        mel_mask = get_mask_from_lengths(mel_len, device, max_mel_len) if mel_len is not None else None
+        src_mask = get_mask_from_lengths(src_len, max_src_len)
+        mel_mask = get_mask_from_lengths(mel_len, max_mel_len) if mel_len is not None else None
         
         # Encoding
         encoder_output, src_embedded, _ = self.encoder(src_seq, src_mask)
         # Variance Adaptor
         acoustic_adaptor_output, d_prediction, p_prediction, e_prediction, mel_len, mel_mask = self.variance_adaptor(
-                device, encoder_output, src_mask, mel_len, mel_mask, 
+                        encoder_output, src_mask, mel_len, mel_mask, 
                         d_target, p_target, e_target, max_mel_len)
         
         mel_prediction, _, hidden_output = self.decoder(acoustic_adaptor_output, mel_mask)
         return mel_prediction, src_embedded, d_prediction, p_prediction, e_prediction, src_mask, mel_mask, mel_len, acoustic_adaptor_output, hidden_output
 
-    def inference(self, device, src_seq, src_len=None, max_src_len=None, return_attn=False):
-        src_mask = get_mask_from_lengths(src_len, device, max_src_len)
+    def inference(self, src_seq, src_len=None, max_src_len=None, return_attn=False):
+        src_mask = get_mask_from_lengths(src_len, max_src_len)
         
         # Encoding
         encoder_output, src_embedded, enc_slf_attn = self.encoder(src_seq, src_mask)

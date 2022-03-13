@@ -2,8 +2,8 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
 import os
-from StyleSpeech.text import text_to_sequence
-from StyleSpeech.utils import pad_1D, pad_2D, process_meta
+from text import text_to_sequence
+from utils_stylespeech import pad_1D, pad_2D, process_meta
 
 
 def prepare_dataloader(data_path, filename, batch_size, shuffle=True, num_workers=2, meta_learning=False, seed=0):

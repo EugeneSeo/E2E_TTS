@@ -1,5 +1,5 @@
-import StyleSpeech.audio as Audio
-from StyleSpeech.text import _clean_text
+import audio as Audio
+from text import _clean_text
 import numpy as np
 import librosa
 import os
@@ -8,7 +8,7 @@ from scipy.io.wavfile import write
 from joblib import Parallel, delayed
 import tgt
 import pyworld as pw
-from StyleSpeech.preprocessors.utils import remove_outlier, get_alignment, average_by_duration
+from preprocessors.utils import remove_outlier, get_alignment, average_by_duration
 from scipy.interpolate import interp1d
 import json
 

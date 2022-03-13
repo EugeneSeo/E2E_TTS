@@ -1,10 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# from models.Modules import ConvNorm, LinearNorm, MultiHeadAttention, get_sinusoid_encoding_table
-# from models.Loss import LSGANLoss
-from StyleSpeech.models.Modules import ConvNorm, LinearNorm, MultiHeadAttention, get_sinusoid_encoding_table
-from StyleSpeech.models.Loss import LSGANLoss
+from models.Modules import ConvNorm, LinearNorm, MultiHeadAttention, get_sinusoid_encoding_table
+from models.Loss import LSGANLoss
 
 LEAKY_RELU = 0.1
 
