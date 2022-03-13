@@ -1,4 +1,3 @@
-###### HiFi-GAN ######
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import itertools
@@ -8,23 +7,16 @@ import argparse
 import json
 import soundfile as sf
 import torch
-import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DistributedSampler, DataLoader
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch.utils.data.distributed
 
-from env_hifi import AttrDict, build_env
-from meldataset_hifi import mel_spectrogram
 from models.Hifigan import *
-
-##### StyleSpeech #####
 from models.Speech import Speech
 from models.Loss import StyleSpeechLoss
 from optimizer_stylespeech import ScheduledOptim
 
-##### E2E_TTS #####
 from model import D_step, G_step, SS_step, parse_batch_LJSpeech as parse_batch
 from dataloader_LJSpeech import prepare_dataloader
 from torch.cuda.amp import autocast, GradScaler
@@ -203,7 +195,7 @@ def train(rank, args, h, c, gpu_ids):
             indices = torch.unsqueeze(indices, 2).expand(-1, -1, 256).cuda()
             
             wav_output = generator(acoustic_adaptor_output, hidden_output, indices=indices)
-            wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
+            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                           h.fmin, h.fmax_for_loss)
             
             wav_crop = torch.unsqueeze(wav, 1)
@@ -319,7 +311,7 @@ def train(rank, args, h, c, gpu_ids):
                             
                             # wav_output = generator(torch.transpose(acoustic_adaptor_output.detach(), 1, 2), hidden_output)
                             wav_output = generator(acoustic_adaptor_output, hidden_output)
-                            wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
+                            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                                         h.fmin, h.fmax_for_loss)
                             mel_crop = torch.transpose(mel_target, 1, 2)
                             wav_crop = torch.unsqueeze(wav, 1)

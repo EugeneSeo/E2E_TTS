@@ -14,24 +14,21 @@ from torch.utils.data import DistributedSampler, DataLoader
 import torch.multiprocessing as mp
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
-from hifi_gan.env import AttrDict, build_env
-from hifi_gan.meldataset import mel_spectrogram
-from hifi_gan.models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
-    discriminator_loss
-from hifi_gan.utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
+from meldataset_hifi import mel_spectrogram
+from models.Hifigan import *
+
 torch.backends.cudnn.benchmark = True
 ##### StyleSpeech #####
 from StyleSpeech.models.StyleSpeech import StyleSpeech
 from StyleSpeech.models.Loss import StyleSpeechLoss
 from StyleSpeech.optimizer import ScheduledOptim
 from StyleSpeech.evaluate import evaluate
-import StyleSpeech.utils as utils_ss
 torch.backends.cudnn.enabled = True
 ##### E2E_TTS #####
 from model import D_step, G_step, SS_step, parse_batch, WBLogger
 from dataloader import prepare_dataloader
 from torch.cuda.amp import autocast, GradScaler
-from utils import plot_data
+import utils
 #--------------------------------------------------------------------#
 
 def train(rank, a, h, c, gpu_ids):
@@ -50,8 +47,8 @@ def train(rank, a, h, c, gpu_ids):
         for param in stylespeech.parameters():
             param.requires_grad = False
     
-    num_param = utils_ss.get_param_num(generator) + utils_ss.get_param_num(stylespeech) \
-                + utils_ss.get_param_num(msd) + utils_ss.get_param_num(mpd)
+    num_param = utils.get_param_num(generator) + utils.get_param_num(stylespeech) \
+                + utils.get_param_num(msd) + utils.get_param_num(mpd)
     print("Model Defined\n")
 
     if rank == 0:
@@ -59,9 +56,9 @@ def train(rank, a, h, c, gpu_ids):
         print("checkpoints directory : ", a.checkpoint_path)
 
     if os.path.isdir(a.checkpoint_path):
-        cp_ss = scan_checkpoint(a.checkpoint_path, 'ss_')
-        cp_g = scan_checkpoint(a.checkpoint_path, 'g_')
-        cp_do = scan_checkpoint(a.checkpoint_path, 'do_')
+        cp_ss = utils.scan_checkpoint(a.checkpoint_path, 'ss_')
+        cp_g = utils.scan_checkpoint(a.checkpoint_path, 'g_')
+        cp_do = utils.scan_checkpoint(a.checkpoint_path, 'do_')
 
     # Add cp_ss & loading code
     steps = 0
@@ -69,9 +66,9 @@ def train(rank, a, h, c, gpu_ids):
     # if True:
         state_dict_do = None
         stylespeech.load_state_dict(torch.load("./cp_StyleSpeech/stylespeech.pth.tar")['model'])
-        state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
+        state_dict_g = utils.load_checkpoint("./cp_hifigan/g_02500000", device)
         generator.load_state_dict(state_dict_g['generator'])
-        state_dict_do_ = load_checkpoint("./cp_hifigan/do_02500000", device)
+        state_dict_do_ = utils.load_checkpoint("./cp_hifigan/do_02500000", device)
         mpd.load_state_dict(state_dict_do_['mpd'])
         msd.load_state_dict(state_dict_do_['msd'])
         last_epoch = -1
@@ -81,9 +78,9 @@ def train(rank, a, h, c, gpu_ids):
         mpd = torch.nn.DataParallel(mpd, gpu_ids)
         msd = torch.nn.DataParallel(msd, gpu_ids)
     else:
-        state_dict_ss = load_checkpoint(cp_ss, device)
-        state_dict_g = load_checkpoint(cp_g, device)
-        state_dict_do = load_checkpoint(cp_do, device)
+        state_dict_ss = utils.load_checkpoint(cp_ss, device)
+        state_dict_g = utils.load_checkpoint(cp_g, device)
+        state_dict_do = utils.load_checkpoint(cp_do, device)
         stylespeech.load_state_dict(state_dict_ss['stylespeech'])
         generator.load_state_dict(state_dict_g['generator'])
         mpd.load_state_dict(state_dict_do['mpd'])
@@ -237,10 +234,10 @@ def train(rank, a, h, c, gpu_ids):
                 if steps % a.checkpoint_interval == 0 and steps != 0:
                     print('Checkpointing')
                     checkpoint_path = "{}/ss_{:08d}".format(a.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path,
+                    utils.save_checkpoint(checkpoint_path,
                                     {'stylespeech': stylespeech.state_dict()})
                     checkpoint_path = "{}/g_{:08d}".format(a.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path,
+                    utils.save_checkpoint(checkpoint_path,
                                     {'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()})
                     checkpoint_path = "{}/do_{:08d}".format(a.checkpoint_path, steps)
                     save_dict = {'mpd': (mpd.module if h.num_gpus > 1 else mpd).state_dict(),
@@ -249,7 +246,7 @@ def train(rank, a, h, c, gpu_ids):
                                      'steps': steps, 'epoch': epoch}
                     if (a.optim_g == "G_only"):
                         save_dict['optim_ss'] = optim_ss.state_dict()
-                    save_checkpoint(checkpoint_path, save_dict)
+                    utils.save_checkpoint(checkpoint_path, save_dict)
                     
 
                 # Tensorboard summary logging
@@ -288,7 +285,7 @@ def train(rank, a, h, c, gpu_ids):
                             wav_target_mel = mel_crop[0].detach().cpu()
                             wav_mel = wav_output_mel[0].detach().cpu()
                             # plotting
-                            plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
+                            utils.plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
                                 ['Synthesized Spectrogram', 'Swav', 'Ground-Truth Spectrogram', 'GTwav'], 
                                 filename=os.path.join(synth_path, 'step_{}.jpg'.format(steps)))
                             print("Synth spectrograms at step {}...\n".format(steps))
@@ -345,14 +342,14 @@ def main():
         data = f.read()
 
     json_config = json.loads(data)
-    h = AttrDict(json_config)
-    build_env(a.config, 'config.json', a.checkpoint_path)
+    h = utils.AttrDict(json_config)
+    utils.build_env(a.config, 'config.json', a.checkpoint_path)
 
     with open(a.config_ss) as f_ss:
         data_ss = f_ss.read()
     json_config_ss = json.loads(data_ss)
-    config = utils_ss.AttrDict(json_config_ss)
-    utils_ss.build_env(a.config_ss, 'config_ss.json', a.checkpoint_path)
+    config = utils.AttrDict(json_config_ss)
+    utils.build_env(a.config_ss, 'config_ss.json', a.checkpoint_path)
     
     gpu_ids = [0]
     h.num_gpus = len(gpu_ids)

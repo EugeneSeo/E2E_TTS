@@ -11,20 +11,16 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
-from hifi_gan.env import AttrDict, build_env
-from hifi_gan.meldataset import mel_spectrogram
-from hifi_gan.models import Generator_interpolation, Generator_intpol2, Generator_intpol3, Generator_intpol4, Generator_intpol5, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
-    discriminator_loss
-from hifi_gan.utils import load_checkpoint
+from meldataset_hifi import mel_spectrogram
+from models.Hifigan import *
 torch.backends.cudnn.benchmark = True
 ##### StyleSpeech #####
-from StyleSpeech.models.StyleSpeech import StyleSpeech
-import StyleSpeech.utils as utils_ss
+from models.StyleSpeech import StyleSpeech
 torch.backends.cudnn.enabled = True
 ##### E2E_TTS #####
 from model import parse_batch
 from dataloader import prepare_dataloader
-from utils import plot_data
+import utils
 
 def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     device =  torch.device('cuda:{:d}'.format(0))
@@ -50,7 +46,7 @@ def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     synth_path = os.path.join(a.save_path, basename)
     os.makedirs(synth_path, exist_ok=True)
 
-    plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
+    utils.plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
         ['Synthesized Spectrogram', 'Swav', 'Ground-Truth Spectrogram', 'GTwav'], 
         filename=os.path.join(synth_path, 'exp_{0}_{1}.jpg'.format(exp_code, a.checkpoint_step)))
     wav_output_val_path = os.path.join(synth_path, 'exp_{0}_{1}.wav'.format(exp_code, a.checkpoint_step))
@@ -72,8 +68,8 @@ def inference_f(a, h, c, max_inf=None):
     cp_ss = os.path.join(a.checkpoint_path, 'ss_{}'.format(a.checkpoint_step))
     cp_g = os.path.join(a.checkpoint_path, 'g_{}'.format(a.checkpoint_step))
 
-    state_dict_ss = load_checkpoint(cp_ss, device)
-    state_dict_g = load_checkpoint(cp_g, device)
+    state_dict_ss = utils.load_checkpoint(cp_ss, device)
+    state_dict_g = utils.load_checkpoint(cp_g, device)
     stylespeech.load_state_dict(state_dict_ss['stylespeech'])
     generator.load_state_dict(state_dict_g['generator'])
 
@@ -105,12 +101,12 @@ def main():
     with open(a.config) as f:
         data = f.read()
     json_config = json.loads(data)
-    h = AttrDict(json_config)
+    h = utils.AttrDict(json_config)
 
     with open(a.config_ss) as f_ss:
         data_ss = f_ss.read()
     json_config_ss = json.loads(data_ss)
-    config = utils_ss.AttrDict(json_config_ss)
+    config = utils.AttrDict(json_config_ss)
 
     gpu_ids = [0]
     h.num_gpus = len(gpu_ids)

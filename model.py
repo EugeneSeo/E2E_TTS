@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
-from models_hifi import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
+from models.Hifigan import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
     discriminator_loss
 from models.StyleSpeech import StyleSpeech
 from models.Loss import StyleSpeechLoss
