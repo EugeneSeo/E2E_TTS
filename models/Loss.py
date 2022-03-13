@@ -50,3 +50,51 @@ class LSGANLoss(nn.Module):
             zeros = torch.zeros(r.size(), requires_grad=False).to(r.device)
             loss = self.criterion(r, zeros)
         return loss
+
+
+class CVCLoss(nn.Module):
+    def __init__(self):
+        super(CVCLoss, self).__init__()
+        self.nce_T = 10
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
+
+    def forward(self, wav_pred, wav_orig):
+        batch_size = wav_pred.shape[0]
+        dim = 32
+
+        wav_pred = wav_pred.view(batch_size, -1, dim)
+        wav_orig = wav_orig.view(batch_size, -1, dim)
+
+        wav_pred_norm = torch.norm(wav_pred, dim=2)
+        wav_orig_norm = torch.norm(wav_orig, dim=2)
+
+        wav_pred = wav_pred / wav_pred_norm.view(batch_size, -1, 1)
+        wav_orig = wav_orig / wav_orig_norm.view(batch_size, -1, 1)
+
+        # # positive samples: each predictions should be close to the corresponding wav-blocks
+        l_pos = torch.bmm(wav_pred.view(batch_size, 1, -1), wav_orig.view(batch_size, -1, 1))
+        l_pos = l_pos.view(batch_size, 1) # (B, 1)
+        
+        # negativa samples: reshape features to batch size
+        melbin_no = wav_orig.shape[1]
+        l_neg_curbin = torch.bmm(wav_pred, wav_orig.transpose(2, 1)) # (B, 256, 256)
+
+        # diagonal entries are similarity between same features, and hence meaningless.
+        # just fill the diagonal with very small number, which is exp(-10) and almost zero
+        diagonal = torch.eye(melbin_no, device=wav_pred.device, dtype=torch.bool)[None, :, :]
+        l_neg_curbin.masked_fill_(diagonal, -10.0)
+        
+        l_neg = l_neg_curbin.view(batch_size, -1)
+
+        # New
+        l_neg2_curbin = torch.bmm(wav_pred, wav_pred.transpose(2, 1)) # (B, 256, 256)
+        diagonal2 = torch.eye(melbin_no, device=wav_pred.device, dtype=torch.bool)[None, :, :]
+        l_neg2_curbin.masked_fill_(diagonal, -10.0)
+        l_neg_internal = l_neg2_curbin.view(batch_size, -1)
+
+        out = torch.cat((l_pos, l_neg, l_neg_internal), dim=1) / self.nce_T
+
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long,
+                                                        device=wav_pred.device))
+        
+        return loss.mean()
