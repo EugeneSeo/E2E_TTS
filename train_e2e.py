@@ -15,10 +15,9 @@ import torch.utils.data.distributed
 from models.Hifigan import *
 from models.StyleSpeech import StyleSpeech
 from models.Loss import StyleSpeechLoss, CVCLoss
-from models.Optimizer import ScheduledOptim
+from models.Optimizer import ScheduledOptim, D_step, G_step, SS_step
 
-from model import D_step, G_step, SS_step, parse_batch
-from dataloader import prepare_dataloader
+from dataloader import prepare_dataloader, parse_batch
 from torch.cuda.amp import autocast, GradScaler
 import utils
 

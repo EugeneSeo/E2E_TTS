@@ -1,3 +1,4 @@
+import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
@@ -8,6 +9,26 @@ import librosa
 import tgt
 from preprocessors.utils import get_alignment
 
+
+def parse_batch(batch):
+    sid = torch.from_numpy(batch["sid"]).long().cuda()
+    text = torch.from_numpy(batch["text"]).long().cuda()
+    mel_target = torch.from_numpy(batch["mel_target"]).float().cuda()
+    D = torch.from_numpy(batch["D"]).long().cuda()
+    log_D = torch.from_numpy(batch["log_D"]).float().cuda()
+    f0 = torch.from_numpy(batch["f0"]).float().cuda()
+    energy = torch.from_numpy(batch["energy"]).float().cuda()
+    src_len = torch.from_numpy(batch["src_len"]).long().cuda()
+    mel_len = torch.from_numpy(batch["mel_len"]).long().cuda()
+    max_src_len = np.max(batch["src_len"]).astype(np.int32)
+    max_mel_len = np.max(batch["mel_len"]).astype(np.int32)
+    ##############################################################
+    mel_start_idx = torch.Tensor(batch["mel_start_idx"]).int().cuda()
+    wav = torch.from_numpy(np.array(batch["wav"], dtype=np.float32)).cuda()
+    ##############################################################
+    return sid, text, mel_target, mel_start_idx, wav, \
+            D, log_D, f0, energy, \
+            src_len, mel_len, max_src_len, max_mel_len
 
 
 def prepare_dataloader(data_path, filename, batch_size, shuffle=True, num_workers=2, meta_learning=False, seed=0, val=False):
