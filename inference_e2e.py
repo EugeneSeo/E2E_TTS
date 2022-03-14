@@ -11,16 +11,15 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
-from meldataset_hifi import mel_spectrogram
+
 from models.Hifigan import *
-torch.backends.cudnn.benchmark = True
-##### StyleSpeech #####
 from models.StyleSpeech import StyleSpeech
-torch.backends.cudnn.enabled = True
-##### E2E_TTS #####
-from model import parse_batch
-from dataloader import prepare_dataloader
+from dataloader import prepare_dataloader, parse_batch
 import utils
+
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
+
 
 def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     device =  torch.device('cuda:{:d}'.format(0))
@@ -32,7 +31,7 @@ def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = SS(
                 device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
     wav_output = G(acoustic_adaptor_output, hidden_output)
-    wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
+    wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                                         h.fmin, h.fmax_for_loss)
     mel_crop = torch.transpose(mel_target, 1, 2)
     wav_crop = torch.unsqueeze(wav, 1)

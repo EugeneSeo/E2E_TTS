@@ -11,20 +11,16 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
-from hifi_gan.env import AttrDict, build_env
-from hifi_gan.meldataset import mel_spectrogram
-from hifi_gan.models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
-    discriminator_loss
-from hifi_gan.utils import load_checkpoint
+
+from models.Hifigan import *
+from train_e2e import load_checkpoint
+from models.StyleSpeech import StyleSpeech
+from dataloader import prepare_dataloader, parse_batch
+import utils
+
 torch.backends.cudnn.benchmark = True
-##### StyleSpeech #####
-from StyleSpeech.models.StyleSpeech import StyleSpeech
-import StyleSpeech.utils as utils_ss
 torch.backends.cudnn.enabled = True
-##### E2E_TTS #####
-from model import parse_batch
-from dataloader import prepare_dataloader
-from utils import plot_data
+
 
 def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     device =  torch.device('cuda:{:d}'.format(0))
@@ -37,7 +33,7 @@ def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, _, _ = SS(
                 device, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
     wav_output = G(torch.transpose(mel_output, 1, 2))
-    wav_output_mel = mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
+    wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
                                                         h.fmin, h.fmax_for_loss)
     mel_crop = torch.transpose(mel_target, 1, 2)
     wav_crop = torch.unsqueeze(wav, 1)
@@ -51,7 +47,7 @@ def create_wav(a, h, c, G, SS, batch, exp_code, basename):
     synth_path = os.path.join(a.save_path, basename)
     os.makedirs(synth_path, exist_ok=True)
 
-    plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
+    utils.plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
         ['Synthesized Spectrogram', 'Swav', 'Ground-Truth Spectrogram', 'GTwav'], 
         filename=os.path.join(synth_path, 'exp_{0}_{1}.jpg'.format(exp_code, a.checkpoint_step)))
     wav_output_val_path = os.path.join(synth_path, 'exp_{0}_{1}.wav'.format(exp_code, a.checkpoint_step))
@@ -133,12 +129,12 @@ def main():
     with open(a.config) as f:
         data = f.read()
     json_config = json.loads(data)
-    h = AttrDict(json_config)
+    h = utils.AttrDict(json_config)
 
     with open(a.config_ss) as f_ss:
         data_ss = f_ss.read()
     json_config_ss = json.loads(data_ss)
-    config = utils_ss.AttrDict(json_config_ss)
+    config = utils.utils.AttrDict(json_config_ss)
 
     gpu_ids = [0]
     h.num_gpus = len(gpu_ids)
