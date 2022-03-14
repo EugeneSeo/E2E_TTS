@@ -3,7 +3,7 @@
     "n_speakers": 1124,
 
     "resblock": "1",
-    "batch_size": 16,
+    "batch_size": 2,
     "learning_rate": 0.0002,
     "adam_b1": 0.8,
     "adam_b2": 0.99,
@@ -26,11 +26,6 @@
     "n_mel_channels": 80,
     "max_seq_len": 1000,
 
-    
-    "dist_backend": "nccl",
-    "dist_url": "tcp://127.0.0.1:1234",
-    "world_size": 2,
-
     "encoder_layer": 4,
     "encoder_head": 2,
     "encoder_hidden": 256,
@@ -51,5 +46,17 @@
     "style_kernel_size": 5,
     "style_vector_dim": 128,
 
-    "grad_clip_thresh": 1.0
+    "lmel_hifi": 45,
+    "lmel_ss": 1,
+    "lr_g": 0.0002,
+    "lr_d": 0.0002,
+    "lr_ss": 0.001,
+
+    "n_warm_up_step": 4000,
+    "grad_clip_thresh": 1.0,
+
+    
+    "dist_backend": "nccl",
+    "dist_url": "tcp://127.0.0.1:1234",
+    "world_size": 2
 }
