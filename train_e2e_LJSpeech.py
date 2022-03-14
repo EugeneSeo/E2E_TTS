@@ -41,7 +41,7 @@ def load_checkpoint(checkpoint_path, model, name, rank, distributed=False):
         print('Model is loaded!') 
     return model
 
-def train(rank, args, h, c, gpu_ids):
+def train(rank, args, c, gpu_ids):
 
     print('Use GPU: {} for training'.format(rank))
     ngpus = args.ngpus
@@ -51,7 +51,7 @@ def train(rank, args, h, c, gpu_ids):
     device = torch.device('cuda:{:d}'.format(rank))
 
     # Define model
-    generator = Generator_intpol5(h).cuda()
+    generator = Generator_intpol5(c).cuda()
     speech = Speech(c).cuda()
     mpd = MultiPeriodDiscriminator().cuda()
     msd = MultiScaleDiscriminator().cuda()
@@ -116,12 +116,12 @@ def train(rank, args, h, c, gpu_ids):
 
     # Optimizers
     if (args.optim_g == "G_only"):
-        optim_g = torch.optim.AdamW(generator.parameters(), args.lr_g, betas=[h.adam_b1, h.adam_b2])
+        optim_g = torch.optim.AdamW(generator.parameters(), args.lr_g, betas=[c.adam_b1, c.adam_b2])
         optim_ss = torch.optim.Adam(speech.parameters(), args.lr_ss, betas=c.betas, eps=c.eps)
     else: # args.optim_g = "G_and_SS"
-        optim_g = torch.optim.AdamW(itertools.chain(generator.parameters(), speech.parameters()), args.lr_g, betas=[h.adam_b1, h.adam_b2])
+        optim_g = torch.optim.AdamW(itertools.chain(generator.parameters(), speech.parameters()), args.lr_g, betas=[c.adam_b1, c.adam_b2])
     optim_d = torch.optim.AdamW(itertools.chain(msd.parameters(), mpd.parameters()),
-                                args.lr_d, betas=[h.adam_b1, h.adam_b2])
+                                args.lr_d, betas=[c.adam_b1, c.adam_b2])
     # optim_d = torch.optim.AdamW(mpd.parameters(), args.lr_d, betas=[h.adam_b1, h.adam_b2])
     print("Optimizer and Loss Function Defined.")
 
@@ -136,8 +136,8 @@ def train(rank, args, h, c, gpu_ids):
     #     optim_d.load_state_dict(state_dict_do_['optim_d'])
 
     # h.lr_decay = 0.8
-    scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
-    scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
+    scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=c.lr_decay, last_epoch=last_epoch)
+    scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=c.lr_decay, last_epoch=last_epoch)
     if (args.optim_g == "G_only"):
         scheduled_optim = ScheduledOptim(optim_ss, c.decoder_hidden, c.n_warm_up_step, steps)
     
@@ -193,8 +193,8 @@ def train(rank, args, h, c, gpu_ids):
             indices = torch.unsqueeze(indices, 2).expand(-1, -1, 256).cuda()
             
             wav_output = generator(acoustic_adaptor_output, hidden_output, indices=indices)
-            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
-                                          h.fmin, h.fmax_for_loss)
+            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), c.n_fft, c.n_mel_channels, c.sampling_rate, c.hop_size, c.win_size,
+                                          c.fmin, c.fmax_for_loss)
             
             wav_crop = torch.unsqueeze(wav, 1)
 
@@ -309,8 +309,8 @@ def train(rank, args, h, c, gpu_ids):
                             
                             # wav_output = generator(torch.transpose(acoustic_adaptor_output.detach(), 1, 2), hidden_output)
                             wav_output = generator(acoustic_adaptor_output, hidden_output)
-                            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), h.n_fft, h.num_mels, c.sampling_rate, h.hop_size, h.win_size,
-                                                        h.fmin, h.fmax_for_loss)
+                            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), c.n_fft, c.n_mel_channels, c.sampling_rate, c.hop_size, c.win_size,
+                                                        c.fmin, c.fmax_for_loss)
                             mel_crop = torch.transpose(mel_target, 1, 2)
                             wav_crop = torch.unsqueeze(wav, 1)
                             
@@ -356,14 +356,13 @@ def main():
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LJSpeech/preprocessed')
     parser.add_argument('--save_path', default='exp_default')
     parser.add_argument('--checkpoint_path', default='cp_default')
-    parser.add_argument('--config', default='./configs/config_ljspeech.json')
     parser.add_argument('--training_epochs', default=1, type=int)
     parser.add_argument('--stdout_interval', default=100, type=int)
     parser.add_argument('--checkpoint_interval', default=1000, type=int)
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=1000, type=int)
     
-    parser.add_argument('--config_ss', default='./configs/config_LJSpeech.json') # Configurations for StyleSpeech model
+    parser.add_argument('--config', default='./configs/config_LJS.json') # Configurations for StyleSpeech model
     parser.add_argument('--optim_g', default='G_and_SS') # "G_and_SS" or "G_only"
     parser.add_argument('--use_scaler', default=False)
     parser.add_argument('--freeze_ss', default=False)
@@ -387,16 +386,9 @@ def main():
 
     with open(args.config) as f:
         data = f.read()
-
-    json_config = json.loads(data)
-    h = utils.AttrDict(json_config)
+    config = json.loads(data)
+    config = utils.AttrDict(config)
     utils.build_env(args.config, 'config.json', args.checkpoint_path)
-
-    with open(args.config_ss) as f_ss:
-        data_ss = f_ss.read()
-    json_config_ss = json.loads(data_ss)
-    config = utils.AttrDict(json_config_ss)
-    utils.build_env(args.config_ss, 'config_ss.json', args.checkpoint_path)
     
     # ngpus = torch.cuda.device_count()
     gpu_ids = [0,1]
@@ -406,9 +398,9 @@ def main():
 
     if args.distributed:
         args.world_size = ngpus
-        mp.spawn(train, nprocs=ngpus, args=(args, h, config, gpu_ids))
+        mp.spawn(train, nprocs=ngpus, args=(args, config, gpu_ids))
     else:
-        train(0, args, h, config, gpu_ids)
+        train(0, args, config, gpu_ids)
 
 if __name__ == '__main__':
     main()
