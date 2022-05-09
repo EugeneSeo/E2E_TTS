@@ -14,12 +14,12 @@ import torch.utils.data.distributed
 
 from models.Hifigan import *
 from models.StyleSpeech import StyleSpeech
-from models.Loss import StyleSpeechLoss2 as StyleSpeechLoss, CVCLoss
+from models.Loss import StyleSpeechLoss as StyleSpeechLoss, CVCLoss
 # from models.Optimizer import ScheduledOptim, D_step, G_step, SS_step
 from models.Optimizer import *
 # from models.Feature import *
 
-from dataloader import prepare_dataloader, parse_batch
+from dataloader_lin import prepare_dataloader, parse_batch
 from torch.cuda.amp import autocast, GradScaler
 import utils
 
@@ -54,8 +54,7 @@ def train(rank, args, config, gpu_ids):
     device = torch.device('cuda:{:d}'.format(rank))
 
     # Define model
-    # generator = Generator_intpol4(config).cuda()
-    generator = Generator_FastSpeech2s(config).cuda()
+    generator = Generator_intpol4(config).cuda()
     stylespeech = StyleSpeech(config).cuda()
     mpd = MultiPeriodDiscriminator().cuda()
     msd = MultiScaleDiscriminator().cuda()
@@ -111,9 +110,9 @@ def train(rank, args, config, gpu_ids):
 
     if args.distributed:
         config.batch_size = config.batch_size // ngpus
-        generator = torch.nn.parallel.DistributedDataParallel(generator, device_ids=[rank], find_unused_parameters=True)
+        generator = torch.nn.parallel.DistributedDataParallel(generator, device_ids=[rank])
         generator_without_ddp = generator.module
-        stylespeech = nn.parallel.DistributedDataParallel(stylespeech, device_ids=[rank], find_unused_parameters=True)
+        stylespeech = nn.parallel.DistributedDataParallel(stylespeech, device_ids=[rank])
         stylespeech_without_ddp = stylespeech.module
         mpd = nn.parallel.DistributedDataParallel(mpd, device_ids=[rank])
         mpd_without_ddp = mpd.module
@@ -187,34 +186,36 @@ def train(rank, args, config, gpu_ids):
                 start_b = time.time()
             
             # Get Data
-            sid, text, mel_target, mel_start_idx, wav, \
+            sid, text, mel_target, spec_target, mel_start_idx, wav, \
                     D, log_D, f0, energy, \
                     src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch)
             
             # Forwards
             mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = stylespeech(
-                    text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
+                    text, src_len, spec_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
             # mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, _, hidden_output = stylespeech(
             #         text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
             indices = [[mel_start_idx[i]+j for j in range(32)] for i in range(config.batch_size)]
             indices = torch.Tensor(indices).type(torch.int64)
-            indices = torch.unsqueeze(indices, 2).expand(-1, -1, 256).cuda()
-            
-            # wav_output = generator(acoustic_adaptor_output, hidden_output, indices=indices)
+            # indices = torch.unsqueeze(indices, 2).expand(-1, -1, 256).cuda()
+            indices = torch.unsqueeze(indices, 2).expand(-1, -1, config.encoder_hidden).cuda()
+
+            wav_output = generator(acoustic_adaptor_output, hidden_output, indices=indices)
             # print("acoustic shape: ", acoustic_adaptor_output.shape)
             # print("hidden shape: ", hidden_output[1].shape)
             # wav_output = generator(hidden_output[1], hidden_output[2:], indices=indices)
-            wav_output = generator(hidden_output[2], hidden_output[3:], indices=indices)
-            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), config.n_fft, config.n_mel_channels, config.sampling_rate, config.hop_size, config.win_size,
-                                          config.fmin, config.fmax_for_loss)
-            
+            # wav_output = generator(hidden_output[2], hidden_output[3:], indices=indices)
+            wav_output_mel = utils.lin_spectrogram(wav_output.squeeze(1), config.n_fft, config.sampling_rate, config.hop_size, config.win_size)
+            # print("wav_output_mel: ", wav_output_mel.shape)
             wav_crop = torch.unsqueeze(wav, 1)
 
             indices2 = [[mel_start_idx[i]+j for j in range(32)] for i in range(config.batch_size)]
             indices2 = torch.Tensor(indices2).type(torch.int64)
-            indices2 = torch.unsqueeze(indices2, 2).expand(-1, -1, 80).cuda()
+            indices2 = torch.unsqueeze(indices2, 2).expand(-1, -1, config.n_mel_channels).cuda()
 
-            mel_crop = torch.transpose(torch.gather(mel_target, 1, indices2), 1, 2)
+            # mel_crop = torch.transpose(torch.gather(mel_target, 1, indices2), 1, 2)
+            mel_crop = torch.transpose(torch.gather(spec_target, 1, indices2), 1, 2)
+            # print("mel_crop: ", mel_crop.shape)
             # mel_crop = torch.transpose(torch.gather(mel_output, 1, indices2), 1, 2)
 
             # Optimizing Step
@@ -230,19 +231,19 @@ def train(rank, args, config, gpu_ids):
             generator.requires_grad_(True)
             if (args.optim_g == "G_and_SS"):
                 loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
-                                                loss_ss, mel_output, mel_target, 
+                                                loss_ss, mel_output, spec_target, 
                                                 log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
                                                 scaler=scaler, retain_graph=False, G_only=False, lmel_hifi=config.lmel_hifi, lmel_ss=config.lmel_ss)
                 if scaler != None:
                     scaler.update()
             else: 
                 loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
-                                                loss_ss, mel_output, mel_target, 
+                                                loss_ss, mel_output, spec_target, 
                                                 log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
                                                 scaler=scaler, retain_graph=True, G_only=True, lmel_hifi=config.lmel_hifi, lmel_ss=config.lmel_ss)
                 # StyleSpeech optimize
                 scheduled_optim.zero_grad()
-                loss_ss_all = SS_step(loss_ss, mel_output, mel_target, 
+                loss_ss_all = SS_step(loss_ss, mel_output, spec_target, 
                         log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len, scaler=scaler)
                 if scaler is None:
                     torch.nn.utils.clip_grad_norm_(stylespeech.parameters(), config.grad_clip_thresh)
@@ -254,6 +255,7 @@ def train(rank, args, config, gpu_ids):
                     scheduled_optim.step(scaler=scaler)
                     scaler.update()
                     scheduled_optim.update_lr()
+            # cleanup()
             # return
             if rank == 0:
                 # STDOUT & log.txt logging
@@ -313,26 +315,44 @@ def train(rank, args, config, gpu_ids):
                     val_err_tot = 0
                     with torch.no_grad():
                         for j, batch in enumerate(validation_loader):
-                            sid, text, mel_target, mel_start_idx, wav, \
+                            sid, text, mel_target, spec_target, mel_start_idx, wav, \
                                     D, log_D, f0, energy, \
                                     src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch)
                             
                             mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = stylespeech(
-                                    text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
+                                    text, src_len, spec_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
                             
                             # wav_output = generator(torch.transpose(acoustic_adaptor_output.detach(), 1, 2), hidden_output)
-                            # wav_output = generator(acoustic_adaptor_output, hidden_output)
+                            wav_output = generator(acoustic_adaptor_output, hidden_output)
                             # wav_output = generator(hidden_output[1], hidden_output[2:])
-                            wav_output = generator(hidden_output[2], hidden_output[3:])
-                            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), config.n_fft, config.n_mel_channels, config.sampling_rate, config.hop_size, config.win_size,
+                            # wav_output = generator(hidden_output[2], hidden_output[3:])
+                            # wav_output_mel = utils.lin_spectrogram(wav_output.squeeze(1), config.n_fft, config.sampling_rate, config.hop_size, config.win_size)
+                            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
                                                         config.fmin, config.fmax_for_loss)
                             mel_crop = torch.transpose(mel_target, 1, 2)
-                            wav_crop = torch.unsqueeze(wav, 1)
+                            spec_crop = torch.transpose(spec_target, 1, 2)
+                            # wav_crop = torch.unsqueeze(wav, 1)
                             
                             length = mel_len[0].item()
+                            
+                            # lin_to_mel(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin, fmax, center=False)
+                            # mel_target = utils.lin_to_mel(mel_target[0, :length].transpose(0,1).unsqueeze(0), config.n_fft, config.n_mel_channels, config.sampling_rate, config.hop_size, config.win_size,
+                            #                             config.fmin, config.fmax_for_loss)
+                            # mel_target = mel_target.squeeze().detach().cpu()
+                            print("line 341")
+                            print(mel_output[0].shape)
+                            mel = utils.lin_to_mel(mel_output[0, :length].transpose(0,1).unsqueeze(0), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
+                                                        config.fmin, config.fmax_for_loss)
+                            mel = mel.squeeze().detach().cpu()
+                            # print("line 345")
+                            wav_target_mel = utils.lin_to_mel(spec_crop[0].unsqueeze(0), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
+                                                        config.fmin, config.fmax_for_loss)
+                            wav_target_mel = wav_target_mel.squeeze().detach().cpu()
+                            
                             mel_target = mel_target[0, :length].detach().cpu().transpose(0, 1)
-                            mel = mel_output[0, :length].detach().cpu().transpose(0, 1)
-                            wav_target_mel = mel_crop[0].detach().cpu()
+                            # mel = mel_output[0, :length].detach().cpu().transpose(0, 1)
+                            # wav_target_mel = mel_crop[0].detach().cpu()
+                            
                             wav_mel = wav_output_mel[0].detach().cpu()
                             # plotting
                             utils.plot_data([mel.numpy(), wav_mel.numpy(), mel_target.numpy(), wav_target_mel.numpy()], 
@@ -377,7 +397,7 @@ def main():
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=1000, type=int)
     
-    parser.add_argument('--config', default='./configs/config.json') # Configurations for StyleSpeech model
+    parser.add_argument('--config', default='./configs/config_lin.json') # Configurations for StyleSpeech model
     parser.add_argument('--optim_g', default='G_and_SS') # "G_and_SS" or "G_only"
     parser.add_argument('--use_scaler', default=False)
     parser.add_argument('--freeze_ss', default=False)

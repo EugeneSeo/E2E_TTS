@@ -174,6 +174,7 @@ def spectral_normalize_torch(magnitudes):
 
 
 mel_basis = {}
+mel_basis_l2m = {}
 hann_window = {}
 
 
@@ -204,3 +205,53 @@ def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin,
     spec = spectral_normalize_torch(spec)
 
     return spec
+
+
+def lin_spectrogram(y, n_fft, sampling_rate, hop_size, win_size, center=False):
+    if torch.min(y) < -1.:
+        print('min value is ', torch.min(y))
+    if torch.max(y) > 1.:
+        print('max value is ', torch.max(y))
+
+    global hann_window
+    dtype_device = str(y.dtype) + '_' + str(y.device)
+    wnsize_dtype_device = str(win_size) + '_' + dtype_device
+    if wnsize_dtype_device not in hann_window:
+        hann_window[wnsize_dtype_device] = torch.hann_window(win_size).to(dtype=y.dtype, device=y.device)
+
+
+    # y: (B, length)
+    y = torch.nn.functional.pad(y.unsqueeze(1), (int((n_fft-hop_size)/2), int((n_fft-hop_size)/2)), mode='reflect')
+    # y: (B, 1, length)
+    y = y.squeeze(1)
+    # y: (B, length)
+    
+    spec = torch.stft(y, n_fft, hop_length=hop_size, win_length=win_size, window=hann_window[wnsize_dtype_device],
+                      center=center, pad_mode='reflect', normalized=False, onesided=True, return_complex=True)
+    spec = torch.view_as_real(spec)
+
+    spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-6) # (B, 513, melbin)
+    return spec
+
+def lin_to_mel(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin, fmax, center=False):
+    global mel_basis_l2m
+    
+    dtype_device = str(y.dtype) + '_' + str(y.device)
+    wnsize_dtype_device = str(win_size) + '_' + dtype_device
+    if wnsize_dtype_device not in mel_basis_l2m:
+        mel = librosa_mel_fn(sampling_rate, n_fft, num_mels, fmin, fmax)
+        mel_basis_l2m[wnsize_dtype_device] = torch.from_numpy(mel).float().to(y.device)
+
+    spec = torch.matmul(mel_basis_l2m[wnsize_dtype_device], y)
+    spec = spectral_normalize_torch(spec)
+
+    return spec
+
+def load_checkpoint(checkpoint_path, model, name, rank, distributed=False):
+    assert os.path.isfile(checkpoint_path)
+    print("Starting model from checkpoint '{}'".format(checkpoint_path))
+    checkpoint_dict = torch.load(checkpoint_path, map_location='cuda:{}'.format(rank))
+    if name in checkpoint_dict:
+        model.load_state_dict(checkpoint_dict[name])
+        print('Model is loaded!') 
+    return model

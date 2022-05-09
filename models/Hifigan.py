@@ -82,7 +82,7 @@ class Generator_E2E(torch.nn.Module):
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
         # self.conv_pre = weight_norm(Conv1d(80, h.upsample_initial_channel, 7, 1, padding=3))
-        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(h.decoder_hidden, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -107,7 +107,7 @@ class Generator_E2E(torch.nn.Module):
         s_size = [1,  8,  64, 128, 256]
         for i in range(len(self.ups)):
             ch = h.upsample_initial_channel//(2**i)
-            self.ss_hidden.append(ConvTranspose1d(256, ch, k_size[i], s_size[i], padding=(k_size[i]-s_size[i])//2))
+            self.ss_hidden.append(ConvTranspose1d(h.decoder_hidden, ch, k_size[i], s_size[i], padding=(k_size[i]-s_size[i])//2))
         
         # new!
         # variance adaptor part
@@ -125,7 +125,7 @@ class Generator_E2E(torch.nn.Module):
         # up to here
 
         self.max_seq_len = 1000
-        self.d_model = 256
+        self.d_model = h.decoder_hidden
         n_position = self.max_seq_len + 1
         self.position_enc = nn.Parameter(
             get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
@@ -192,6 +192,143 @@ class Generator_E2E(torch.nn.Module):
         remove_weight_norm(self.conv_pre)
         remove_weight_norm(self.conv_post)
 
+
+class Generator_copy_paste(torch.nn.Module):
+    def __init__(self, h):
+        super(Generator_copy_paste, self).__init__()
+        #################################################
+        h.upsample_rates = [4,4,2,2,2,2]
+        h.upsample_kernel_sizes = [8,8,4,4,4,4]
+        #################################################
+        self.h = h
+        self.num_kernels = len(h.resblock_kernel_sizes)
+        self.num_upsamples = len(h.upsample_rates)
+        self.conv_pre = weight_norm(Conv1d(h.decoder_hidden, h.upsample_initial_channel, 7, 1, padding=3))
+        resblock = ResBlock1 if h.resblock == '1' else ResBlock2
+
+        self.ups = nn.ModuleList()
+        for i, (u, k) in enumerate(zip(h.upsample_rates, h.upsample_kernel_sizes)):
+            self.ups.append(weight_norm(
+                ConvTranspose1d(h.upsample_initial_channel//(2**i), h.upsample_initial_channel//(2**(i+1)),
+                                k, u, padding=(k-u)//2)))
+
+        self.resblocks = nn.ModuleList()
+        for i in range(len(self.ups)):
+            ch = h.upsample_initial_channel//(2**(i+1))
+            for j, (k, d) in enumerate(zip(h.resblock_kernel_sizes, h.resblock_dilation_sizes)):
+                self.resblocks.append(resblock(h, ch, k, d))
+
+        self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3))
+        self.ups.apply(init_weights)
+        self.conv_post.apply(init_weights)
+
+        #################################################
+        self.expand_model = ConstantExpandFrame()
+        self.up_cum = [1]
+        for i, u in enumerate(h.upsample_rates):
+            self.up_cum.append(self.up_cum[-1] * u)
+
+        # variance adaptor part
+        self.ss_hidden = nn.ModuleList()
+        self.lns = nn.ModuleList()
+        k_size = [3, 5, 7, 11]
+        for i in range(len(k_size)):
+            ch = h.upsample_initial_channel//(2**(i+1))
+            self.ss_hidden.append(Conv1d(h.decoder_hidden, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
+            self.lns.append(nn.LayerNorm(ch))
+        
+        self.relu = nn.ReLU()
+        self.mish = Mish()
+        self.dropout = nn.Dropout(0.1)
+
+        self.max_seq_len = 1000
+        self.d_model = h.decoder_hidden
+        n_position = self.max_seq_len + 1
+        # self.position_enc = nn.Parameter(
+        #     get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
+        G, M = 4, 16
+        x = torch.randn((n_position, G, M))
+        enc = LearnableFourierPositionalEncoding(G, M, self.d_model, 32, self.d_model, 10)
+        self.position_enc = nn.Parameter(enc(x).unsqueeze(0), requires_grad = False)
+        #################################################
+
+    def forward(self, x, hidden, indices=None):
+        batch_size, max_len = x.shape[0], x.shape[1]
+        # poistion encoding
+        if x.shape[1] > self.max_seq_len:
+            # position_embedded = get_sinusoid_encoding_table(x.shape[1], self.d_model)[:x.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(x.device)
+            G, M = 4, 16
+            x = torch.randn((src_seq.shape[1], G, M))
+            enc = LearnableFourierPositionalEncoding(G, M, self.d_model, 32, self.d_model, 10)
+            position_embedded = enc(x)[:src_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(src_seq.device)
+        else:
+            position_embedded = self.position_enc[:, :max_len, :].expand(batch_size, -1, -1)
+        x = x + position_embedded
+        
+        if (indices == None): # inference
+            x = torch.transpose(x, 1, 2)
+        else:
+            x = torch.transpose(torch.gather(x, 1, indices), 1, 2)
+            max_len = 32
+
+        x = self.conv_pre(x)
+        for i in range(self.num_upsamples):
+            x = F.leaky_relu(x, LRELU_SLOPE)
+            
+            if (i > 0) and (i < 5):
+                # position encoding
+                h = hidden[i-1] + position_embedded
+                if (indices != None): # train
+                    h = torch.gather(h, 1, indices)
+
+                #################################################   
+                l = torch.Tensor([[self.up_cum[i] for _ in range(max_len)] for _ in range(batch_size)])
+                # print(l)
+                l = l.to(x.device)
+                h = self.expand_model(h, l)
+                #################################################   
+                h = self.ss_hidden[i-1](h)
+                # h = self.relu(h).transpose(1,2)
+                h = self.mish(h).transpose(1,2)
+                h = self.dropout(self.lns[i-1](h)).transpose(1,2)            
+                x = x + h
+            
+            x = self.ups[i](x)
+            xs = None
+            for j in range(self.num_kernels):
+                if xs is None:
+                    xs = self.resblocks[i*self.num_kernels+j](x)
+                else:
+                    xs += self.resblocks[i*self.num_kernels+j](x)
+            x = xs / self.num_kernels
+        x = F.leaky_relu(x)
+        x = self.conv_post(x)
+        x = torch.tanh(x)
+
+        return x
+
+    def remove_weight_norm(self):
+        print('Removing weight norm...')
+        for l in self.ups:
+            remove_weight_norm(l)
+        for l in self.resblocks:
+            l.remove_weight_norm()
+        remove_weight_norm(self.conv_pre)
+        remove_weight_norm(self.conv_post)
+
+
+class ConstantExpandFrame(nn.Module):
+    def __init__(self):
+        super(ConstantExpandFrame, self).__init__()
+        pass
+
+    def forward(self, hidden, duration):
+        copy_n = int(duration[0][0].item())
+        B, D, N = hidden.shape
+        out = hidden.transpose(1,2).view(B, N, D, 1).repeat(1, 1, 1, copy_n).view(B, N, -1)
+        return out
+
+
 class Generator_interpolation(torch.nn.Module):
     def __init__(self, h):
         super(Generator_interpolation, self).__init__()
@@ -199,7 +336,7 @@ class Generator_interpolation(torch.nn.Module):
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
         # self.conv_pre = weight_norm(Conv1d(80, h.upsample_initial_channel, 7, 1, padding=3))
-        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(h.decoder_hidden, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -230,7 +367,7 @@ class Generator_interpolation(torch.nn.Module):
         k_size = [3, 5, 7, 11, 13]
         for i in range(len(self.ups)):
             ch = h.upsample_initial_channel//(2**i)
-            self.ss_hidden.append(Conv1d(256, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
+            self.ss_hidden.append(Conv1d(h.decoder_hidden, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
             self.lns.append(nn.LayerNorm(ch))
         
         self.relu = nn.ReLU()
@@ -238,7 +375,7 @@ class Generator_interpolation(torch.nn.Module):
         self.dropout = nn.Dropout(0.1)
 
         self.max_seq_len = 1000
-        self.d_model = 256
+        self.d_model = h.decoder_hidden
         n_position = self.max_seq_len + 1
         self.position_enc = nn.Parameter(
             get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
@@ -310,7 +447,7 @@ class Generator_intpol2(torch.nn.Module):
         self.h = h
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
-        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(h.decoder_hidden, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -341,7 +478,7 @@ class Generator_intpol2(torch.nn.Module):
         k_size = [3, 5, 7, 11]
         for i in range(len(k_size)):
             ch = h.upsample_initial_channel//(2**i)
-            self.ss_hidden.append(Conv1d(256, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
+            self.ss_hidden.append(Conv1d(h.decoder_hidden, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
             self.lns.append(nn.LayerNorm(ch))
         
         self.relu = nn.ReLU()
@@ -349,7 +486,7 @@ class Generator_intpol2(torch.nn.Module):
         self.dropout = nn.Dropout(0.1)
 
         self.max_seq_len = 1000
-        self.d_model = 256
+        self.d_model = h.decoder_hidden
         n_position = self.max_seq_len + 1
         self.position_enc = nn.Parameter(
             get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
@@ -421,7 +558,7 @@ class Generator_intpol3(torch.nn.Module):
         self.h = h
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
-        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(h.decoder_hidden, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -452,7 +589,7 @@ class Generator_intpol3(torch.nn.Module):
         k_size = [3, 5, 7, 11]
         for i in range(len(k_size)):
             ch = h.upsample_initial_channel//(2**(i+1))
-            self.ss_hidden.append(Conv1d(256, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
+            self.ss_hidden.append(Conv1d(h.decoder_hidden, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
             self.lns.append(nn.LayerNorm(ch))
         
         self.relu = nn.ReLU()
@@ -460,7 +597,7 @@ class Generator_intpol3(torch.nn.Module):
         self.dropout = nn.Dropout(0.1)
 
         self.max_seq_len = 1000
-        self.d_model = 256
+        self.d_model = h.decoder_hidden
         n_position = self.max_seq_len + 1
         self.position_enc = nn.Parameter(
             get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
@@ -536,7 +673,7 @@ class Generator_intpol4(torch.nn.Module):
         self.h = h
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
-        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(h.decoder_hidden, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -567,7 +704,7 @@ class Generator_intpol4(torch.nn.Module):
         k_size = [3, 5, 7, 11]
         for i in range(len(k_size)):
             ch = h.upsample_initial_channel//(2**(i+1))
-            self.ss_hidden.append(Conv1d(256, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
+            self.ss_hidden.append(Conv1d(h.decoder_hidden, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
             self.lns.append(nn.LayerNorm(ch))
         
         self.relu = nn.ReLU()
@@ -575,7 +712,7 @@ class Generator_intpol4(torch.nn.Module):
         self.dropout = nn.Dropout(0.1)
 
         self.max_seq_len = 1000
-        self.d_model = 256
+        self.d_model = h.decoder_hidden
         n_position = self.max_seq_len + 1
         self.position_enc = nn.Parameter(
             get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
@@ -651,7 +788,7 @@ class Generator_intpol5(torch.nn.Module):
         self.h = h
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
-        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(h.decoder_hidden, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -682,7 +819,7 @@ class Generator_intpol5(torch.nn.Module):
         k_size = [3, 5, 7, 11]
         for i in range(len(k_size)):
             ch = h.upsample_initial_channel//(2**(i+1))
-            self.ss_hidden.append(Conv1d(256, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
+            self.ss_hidden.append(Conv1d(h.decoder_hidden, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
             self.lns.append(nn.LayerNorm(ch))
         
         self.relu = nn.ReLU()
@@ -690,7 +827,7 @@ class Generator_intpol5(torch.nn.Module):
         self.dropout = nn.Dropout(0.1)
 
         self.max_seq_len = 1000
-        self.d_model = 256
+        self.d_model = h.decoder_hidden
         n_position = self.max_seq_len + 1
         self.position_enc = nn.Parameter(
             get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
@@ -1013,3 +1150,118 @@ def generator_loss(disc_outputs):
 
     return loss, gen_losses
 
+class Generator_FastSpeech2s(torch.nn.Module):
+    def __init__(self, h):
+        super(Generator_FastSpeech2s, self).__init__()
+        self.h = h
+        self.num_kernels = len(h.resblock_kernel_sizes)
+        self.num_upsamples = len(h.upsample_rates)
+        # self.conv_pre = weight_norm(Conv1d(80, h.upsample_initial_channel, 7, 1, padding=3))
+        self.conv_pre = weight_norm(Conv1d(256, h.upsample_initial_channel, 7, 1, padding=3))
+        resblock = ResBlock1 if h.resblock == '1' else ResBlock2
+
+        self.ups = nn.ModuleList()
+        for i, (u, k) in enumerate(zip(h.upsample_rates, h.upsample_kernel_sizes)):
+            self.ups.append(weight_norm(
+                ConvTranspose1d(h.upsample_initial_channel//(2**i), h.upsample_initial_channel//(2**(i+1)),
+                                k, u, padding=(k-u)//2)))
+
+        self.resblocks = nn.ModuleList()
+        for i in range(len(self.ups)):
+            ch = h.upsample_initial_channel//(2**(i+1))
+            for j, (k, d) in enumerate(zip(h.resblock_kernel_sizes, h.resblock_dilation_sizes)):
+                self.resblocks.append(resblock(h, ch, k, d))
+
+        self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3))
+        self.ups.apply(init_weights)
+        self.conv_post.apply(init_weights)
+
+        #################################################
+        self.expand_model = ExpandFrame()
+        self.up_cum = [1]
+        for i, u in enumerate(h.upsample_rates):
+            self.up_cum.append(self.up_cum[-1] * u)
+
+        # variance adaptor part
+        self.ss_hidden = nn.ModuleList()
+        self.lns = nn.ModuleList()
+        k_size = [3, 5, 7, 11, 13]
+        for i in range(len(self.ups)):
+            ch = h.upsample_initial_channel//(2**i)
+            self.ss_hidden.append(Conv1d(256, ch, k_size[i], 1, padding=(k_size[i]-1)//2))
+            self.lns.append(nn.LayerNorm(ch))
+        
+        self.relu = nn.ReLU()
+        self.mish = Mish()
+        self.dropout = nn.Dropout(0.1)
+
+        self.max_seq_len = 1000
+        self.d_model = 256
+        n_position = self.max_seq_len + 1
+        self.position_enc = nn.Parameter(
+            get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
+        #################################################
+
+    def forward(self, x, hidden, indices=None):
+        starting_idx = 3 # 0(Vanila), 1, ...
+        # x = hidden[0]
+
+        batch_size, max_len = x.shape[0], x.shape[1]
+        # poistion encoding
+        if x.shape[1] > self.max_seq_len:
+            position_embedded = get_sinusoid_encoding_table(x.shape[1], self.d_model)[:x.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(x.device)
+        else:
+            position_embedded = self.position_enc[:, :max_len, :].expand(batch_size, -1, -1)
+        x = x + position_embedded
+        
+        # print("position_em: ", position_embedded.shape)
+        if (indices == None): # inference
+            x = torch.transpose(x, 1, 2)
+        else:
+            x = torch.transpose(torch.gather(x, 1, indices), 1, 2)
+            max_len = 32
+
+        x = self.conv_pre(x)
+        for i in range(self.num_upsamples):
+            x = F.leaky_relu(x, LRELU_SLOPE)
+            
+            # position encoding
+            if (i > 0) and (i < (self.num_upsamples - starting_idx + 1)):
+                h = hidden[i-1] + position_embedded
+                if (indices != None): # train
+                    h = torch.gather(h, 1, indices)
+
+                #################################################   
+                l = torch.Tensor([[self.up_cum[i] for _ in range(max_len)] for _ in range(batch_size)])
+                # print(l)
+                l = l.to(x.device)
+                h = self.expand_model(h, l)
+                #################################################   
+                h = self.ss_hidden[i](h)
+                # h = self.relu(h).transpose(1,2)
+                h = self.mish(h).transpose(1,2)
+                h = self.dropout(self.lns[i](h)).transpose(1,2)            
+                x = x + h
+            
+            x = self.ups[i](x)
+            xs = None
+            for j in range(self.num_kernels):
+                if xs is None:
+                    xs = self.resblocks[i*self.num_kernels+j](x)
+                else:
+                    xs += self.resblocks[i*self.num_kernels+j](x)
+            x = xs / self.num_kernels
+        x = F.leaky_relu(x)
+        x = self.conv_post(x)
+        x = torch.tanh(x)
+
+        return x
+
+    def remove_weight_norm(self):
+        print('Removing weight norm...')
+        for l in self.ups:
+            remove_weight_norm(l)
+        for l in self.resblocks:
+            l.remove_weight_norm()
+        remove_weight_norm(self.conv_pre)
+        remove_weight_norm(self.conv_post)

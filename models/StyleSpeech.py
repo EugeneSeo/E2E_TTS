@@ -4,7 +4,7 @@ import numpy as np
 from text.symbols import symbols
 import models.Constants as Constants
 from models.Modules import Mish, LinearNorm, ConvNorm, Conv1dGLU, \
-                    MultiHeadAttention, StyleAdaptiveLayerNorm, get_sinusoid_encoding_table
+                    MultiHeadAttention, StyleAdaptiveLayerNorm, get_sinusoid_encoding_table, LearnableFourierPositionalEncoding
 from models.VarianceAdaptor import VarianceAdaptor
 from models.Loss import StyleSpeechLoss
 from utils import get_mask_from_lengths
@@ -106,8 +106,12 @@ class Encoder(nn.Module):
         self.prenet = Prenet(self.d_model, self.d_model, self.dropout)
 
         n_position = self.max_seq_len + 1
-        self.position_enc = nn.Parameter(
-            get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
+        # self.position_enc = nn.Parameter(
+        #     get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
+        G, M = 4, 16
+        x = torch.randn((n_position, G, M))
+        enc = LearnableFourierPositionalEncoding(G, M, self.d_model, 32, self.d_model, 10)
+        self.position_enc = nn.Parameter(enc(x).unsqueeze(0), requires_grad = False)
 
         self.layer_stack = nn.ModuleList([FFTBlock(
             self.d_model, self.d_inner, self.n_head, self.d_k, self.d_v, 
@@ -128,7 +132,11 @@ class Encoder(nn.Module):
         src_seq = self.prenet(src_embedded, mask)
         # position encoding
         if src_seq.shape[1] > self.max_seq_len:
-            position_embedded = get_sinusoid_encoding_table(src_seq.shape[1], self.d_model)[:src_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(src_seq.device)
+            # position_embedded = get_sinusoid_encoding_table(src_seq.shape[1], self.d_model)[:src_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(src_seq.device)
+            G, M = 4, 16
+            x = torch.randn((src_seq.shape[1], G, M))
+            enc = LearnableFourierPositionalEncoding(G, M, self.d_model, 32, self.d_model, 10)
+            position_embedded = enc(x)[:src_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(src_seq.device)
         else:
             position_embedded = self.position_enc[:, :max_len, :].expand(batch_size, -1, -1)
         enc_output = src_seq + position_embedded
@@ -169,8 +177,12 @@ class Decoder(nn.Module):
         )
 
         n_position = self.max_seq_len + 1
-        self.position_enc = nn.Parameter(
-            get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
+        # self.position_enc = nn.Parameter(
+        #     get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
+        G, M = 4, 16
+        x = torch.randn((n_position, G, M))
+        enc = LearnableFourierPositionalEncoding(G, M, self.d_model, 32, self.d_model, 10)
+        self.position_enc = nn.Parameter(enc(x).unsqueeze(0), requires_grad = False)
 
         self.layer_stack = nn.ModuleList([FFTBlock(
             self.d_model, self.d_inner, self.n_head, self.d_k, self.d_v, 
@@ -182,6 +194,9 @@ class Decoder(nn.Module):
             nn.Linear(self.d_model, self.d_out)
         )
 
+        # new: fast lin-spectrogram generation
+        self.lin_gen_layer = 3
+
     def forward(self, enc_seq, style_code, mask):
         batch_size, max_len = enc_seq.shape[0], enc_seq.shape[1]
         # -- Prepare masks
@@ -192,7 +207,11 @@ class Decoder(nn.Module):
         dec_embedded = self.prenet(enc_seq)
         # poistion encoding
         if enc_seq.shape[1] > self.max_seq_len:
-            position_embedded = get_sinusoid_encoding_table(enc_seq.shape[1], self.d_model)[:enc_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(enc_seq.device)
+            # position_embedded = get_sinusoid_encoding_table(enc_seq.shape[1], self.d_model)[:enc_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(enc_seq.device)
+            G, M = 4, 16
+            x = torch.randn((src_seq.shape[1], G, M))
+            enc = LearnableFourierPositionalEncoding(G, M, self.d_model, 32, self.d_model, 10)
+            position_embedded = enc(x)[:src_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(src_seq.device)
         else:
             position_embedded = self.position_enc[:, :max_len, :].expand(batch_size, -1, -1)
         dec_output = dec_embedded + position_embedded
@@ -201,7 +220,7 @@ class Decoder(nn.Module):
         #################################################
         output = []
         #################################################
-        for dec_layer in self.layer_stack:
+        for i, dec_layer in enumerate(self.layer_stack):
             dec_output, dec_slf_attn = dec_layer(
                 dec_output, style_code,
                 mask=mask,
@@ -209,12 +228,17 @@ class Decoder(nn.Module):
             slf_attn.append(dec_slf_attn)
             #################################################
             output.append(dec_output)
+            if i == self.lin_gen_layer:
+                final_output = self.fc_out(dec_output)
             #################################################
         # last fc
         dec_output = self.fc_out(dec_output)
+        if self.n_layers < self.lin_gen_layer:
+            final_output = self.fc_out(dec_output)
         #################################################
         # return dec_output, slf_attn # original
-        return dec_output, slf_attn, output
+        # return dec_output, slf_attn, output
+        return final_output, slf_attn, output
         #################################################
 
 

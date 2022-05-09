@@ -30,7 +30,8 @@ def load_checkpoint(checkpoint_path, model, name, rank, distributed=False):
     print("Starting model from checkpoint '{}'".format(checkpoint_path))
     checkpoint_dict = torch.load(checkpoint_path, map_location='cuda:{}'.format(rank))
     if name in checkpoint_dict:
-        if distributed:
+        # if distributed:
+        if False:
             state_dict = {}
             for k,v in checkpoint_dict[name].items():
                 state_dict['module.{}'.format(k)] = v
@@ -51,7 +52,7 @@ def train(rank, args, config, gpu_ids):
     device = torch.device('cuda:{:d}'.format(rank))
 
     # Define model
-    generator = Generator_intpol5(config).cuda()
+    generator = Generator_intpol4(config).cuda()
     speech = Speech(config).cuda()
     mpd = MultiPeriodDiscriminator().cuda()
     msd = MultiScaleDiscriminator().cuda()
@@ -80,17 +81,7 @@ def train(rank, args, config, gpu_ids):
     speech_without_ddp = speech
     mpd_without_ddp = mpd
     msd_without_ddp = msd
-    if args.distributed:
-        config.batch_size = config.batch_size // ngpus
-        generator = torch.nn.parallel.DistributedDataParallel(generator, device_ids=[rank])
-        generator_without_ddp = generator.module
-        speech = nn.parallel.DistributedDataParallel(speech, device_ids=[rank])
-        speech_without_ddp = speech.module
-        mpd = nn.parallel.DistributedDataParallel(mpd, device_ids=[rank])
-        mpd_without_ddp = mpd.module
-        msd = nn.parallel.DistributedDataParallel(msd, device_ids=[rank])
-        msd_without_ddp = msd.module
-    
+
     # Add cp_ss & loading code
     steps = 0
     if cp_g is None or (cp_do is None or cp_ss is None):
@@ -114,6 +105,17 @@ def train(rank, args, config, gpu_ids):
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
 
+    if args.distributed:
+        config.batch_size = config.batch_size // ngpus
+        generator = torch.nn.parallel.DistributedDataParallel(generator, device_ids=[rank])
+        generator_without_ddp = generator.module
+        speech = nn.parallel.DistributedDataParallel(speech, device_ids=[rank])
+        speech_without_ddp = speech.module
+        mpd = nn.parallel.DistributedDataParallel(mpd, device_ids=[rank])
+        mpd_without_ddp = mpd.module
+        msd = nn.parallel.DistributedDataParallel(msd, device_ids=[rank])
+        msd_without_ddp = msd.module
+    
     # Optimizers
     if (args.optim_g == "G_only"):
         optim_g = torch.optim.AdamW(generator.parameters(), config.lr_g, betas=[config.adam_b1, config.adam_b2])
@@ -272,7 +274,7 @@ def train(rank, args, config, gpu_ids):
                                     {'speech': speech_without_ddp.state_dict()})
                     checkpoint_path = "{}/g_{:08d}".format(args.checkpoint_path, steps)
                     utils.save_checkpoint(checkpoint_path,
-                                    {'generator': enerator_without_ddp.state_dict()})
+                                    {'generator': generator_without_ddp.state_dict()})
                     checkpoint_path = "{}/do_{:08d}".format(args.checkpoint_path, steps)
                     save_dict = {'mpd': mpd_without_ddp.state_dict(),
                                      'msd': msd_without_ddp.state_dict(),
@@ -333,8 +335,8 @@ def train(rank, args, config, gpu_ids):
                     speech.train()
                     generator.train()
             
-            cleanup()
-            return
+            # cleanup()
+            # return
 
             steps += 1
 
@@ -378,8 +380,9 @@ def main():
         data = f.read()
     config = json.loads(data)
     config = utils.AttrDict(config)
-    utils.build_env(args.config, 'config.json', args.checkpoint_path)
-    
+    if not os.path.exists('{}/config.json'.format(args.checkpoint_path)):
+        utils.build_env(args.config, 'config.json', args.checkpoint_path)
+        
     # ngpus = torch.cuda.device_count()
     gpu_ids = [0,1]
     ngpus = len(gpu_ids)

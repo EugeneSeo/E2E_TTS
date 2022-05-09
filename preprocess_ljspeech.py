@@ -1,7 +1,7 @@
 import os
 import argparse
 import random
-import StyleSpeech.preprocessors.ljspeech as ljspeech
+import preprocessors.ljspeech as ljspeech
 import json
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,6,7"

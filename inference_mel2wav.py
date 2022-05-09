@@ -30,7 +30,7 @@ def create_wav(args, config, G, SS, batch, exp_code, basename):
     
     mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = SS(
                 text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
-    wav_output = G(acoustic_adaptor_output, hidden_output)
+    wav_output = G(torch.transpose(mel_output, 1, 2))
     wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), config.n_fft, config.n_mel_channels, config.sampling_rate, config.hop_size, config.win_size,
                                                         config.fmin, config.fmax_for_loss)
     mel_crop = torch.transpose(mel_target, 1, 2)
@@ -59,12 +59,16 @@ def inference_f(args, config, max_inf=None):
     count = 0
 
     os.makedirs(args.save_path, exist_ok=True)
-    # device =  torch.device('cuda:{:d}'.format(0))
-    generator = Generator_intpol3(config).cuda()
+    
+    with open("./configs/config_hifi.json") as f:
+        data = f.read()
+    hifi_config = json.loads(data)
+    hifi_config = utils.AttrDict(hifi_config)
+    generator = Generator(hifi_config).cuda()
     stylespeech = StyleSpeech(config).cuda()
 
     cp_ss = os.path.join(args.checkpoint_path, 'ss_{}'.format(args.checkpoint_step))
-    cp_g = os.path.join(args.checkpoint_path, 'g_{}'.format(args.checkpoint_step))
+    cp_g = "./cp_hifigan/g_02500000"
 
     utils.load_checkpoint(cp_ss, stylespeech, "stylespeech", 0)
     utils.load_checkpoint(cp_g, generator, "generator", 0)
@@ -77,8 +81,7 @@ def inference_f(args, config, max_inf=None):
         if (count == max_inf):
             break
         basename = batch["id"][0]
-        # create_wav(args, config, generator, stylespeech, batch, exp_code, basename)
-        print(batch["id"])
+        create_wav(args, config, generator, stylespeech, batch, exp_code, basename)
         count += 1
 
 
@@ -87,9 +90,9 @@ def main():
 
     parser.add_argument('--group_name', default=None)
     parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
-    parser.add_argument('--save_path', default='test')
-    parser.add_argument('--checkpoint_path', default='cp_20220403')
-    parser.add_argument('--checkpoint_step', default='00067000')
+    parser.add_argument('--save_path', default='test_mel2wav')
+    parser.add_argument('--checkpoint_path', default='cp_20220315')
+    parser.add_argument('--checkpoint_step', default='00020000')
     # parser.add_argument('--config', default='./hifi_gan/config_v1.json')
     # parser.add_argument('--config_ss', default='./StyleSpeech/configs/config.json') # Configurations for StyleSpeech model
     parser.add_argument('--max_inf', default=10, type=int)
