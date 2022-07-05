@@ -7,12 +7,12 @@ import argparse
 import json
 import soundfile as sf
 import torch
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch.utils.data.distributed
 
-from models.Hifigan import *
+from models.Hifigan import MultiPeriodDiscriminator as MPD, MultiScaleDiscriminator as MSD, Generator_intpol
 from models.StyleSpeech import StyleSpeech
 from models.Loss import StyleSpeechLoss as StyleSpeechLoss, CVCLoss
 # from models.Optimizer import ScheduledOptim, D_step, G_step, SS_step
@@ -54,10 +54,10 @@ def train(rank, args, config, gpu_ids):
     device = torch.device('cuda:{:d}'.format(rank))
 
     # Define model
-    generator = Generator_intpol4(config).cuda()
+    generator = Generator_intpol(config).cuda()
     stylespeech = StyleSpeech(config).cuda()
-    mpd = MultiPeriodDiscriminator().cuda()
-    msd = MultiScaleDiscriminator().cuda()
+    mpd = MPD().cuda()
+    msd = MSD().cuda()
     loss_ss = StyleSpeechLoss()
     loss_cvc = CVCLoss()
     # feature = PatchSampleF()
@@ -112,11 +112,11 @@ def train(rank, args, config, gpu_ids):
         config.batch_size = config.batch_size // ngpus
         generator = torch.nn.parallel.DistributedDataParallel(generator, device_ids=[rank])
         generator_without_ddp = generator.module
-        stylespeech = nn.parallel.DistributedDataParallel(stylespeech, device_ids=[rank])
+        stylespeech = torch.nn.parallel.DistributedDataParallel(stylespeech, device_ids=[rank])
         stylespeech_without_ddp = stylespeech.module
-        mpd = nn.parallel.DistributedDataParallel(mpd, device_ids=[rank])
+        mpd = torch.nn.parallel.DistributedDataParallel(mpd, device_ids=[rank])
         mpd_without_ddp = mpd.module
-        msd = nn.parallel.DistributedDataParallel(msd, device_ids=[rank])
+        msd = torch.nn.parallel.DistributedDataParallel(msd, device_ids=[rank])
         msd_without_ddp = msd.module
 
     # Optimizers
@@ -149,7 +149,7 @@ def train(rank, args, config, gpu_ids):
     train_loader = prepare_dataloader(args.data_path, "train.txt", shuffle=True, batch_size=config.batch_size) 
     if rank == 0:        
         validation_loader = prepare_dataloader(args.data_path, "val.txt", shuffle=True, batch_size=1, val=True) 
-        sw = SummaryWriter(os.path.join(args.save_path, 'logs'))
+        # sw = SummaryWriter(os.path.join(args.save_path, 'logs'))
         # Init logger
         # log_path = os.path.join(args.save_path, 'log.txt')
         log_path = os.path.join(args.checkpoint_path, 'log.txt')
@@ -255,8 +255,8 @@ def train(rank, args, config, gpu_ids):
                     scheduled_optim.step(scaler=scaler)
                     scaler.update()
                     scheduled_optim.update_lr()
-            # cleanup()
-            # return
+            cleanup()
+            return
             if rank == 0:
                 # STDOUT & log.txt logging
                 if steps % args.stdout_interval == 0:
@@ -298,13 +298,13 @@ def train(rank, args, config, gpu_ids):
                     utils.save_checkpoint(checkpoint_path, save_dict)
                     
 
-                # Tensorboard summary logging
-                if steps % args.summary_interval == 0:
-                    print('Tensorboard summary logging')
-                    if (args.optim_g == "G_only"):
-                        sw.add_scalar("training/loss_ss_all", loss_ss_all, steps)
-                    sw.add_scalar("training/gen_loss_total", loss_gen_all, steps)
-                    sw.add_scalar("training/mel_spec_error", mel_error, steps)
+                # # Tensorboard summary logging
+                # if steps % args.summary_interval == 0:
+                #     print('Tensorboard summary logging')
+                #     if (args.optim_g == "G_only"):
+                #         sw.add_scalar("training/loss_ss_all", loss_ss_all, steps)
+                #     sw.add_scalar("training/gen_loss_total", loss_gen_all, steps)
+                #     sw.add_scalar("training/mel_spec_error", mel_error, steps)
 
                 # Validation
                 if steps % args.validation_interval == 0: # and steps != 0:
@@ -339,7 +339,7 @@ def train(rank, args, config, gpu_ids):
                             # mel_target = utils.lin_to_mel(mel_target[0, :length].transpose(0,1).unsqueeze(0), config.n_fft, config.n_mel_channels, config.sampling_rate, config.hop_size, config.win_size,
                             #                             config.fmin, config.fmax_for_loss)
                             # mel_target = mel_target.squeeze().detach().cpu()
-                            print("line 341")
+                            # print("line 341")
                             print(mel_output[0].shape)
                             mel = utils.lin_to_mel(mel_output[0, :length].transpose(0,1).unsqueeze(0), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
                                                         config.fmin, config.fmax_for_loss)
@@ -388,7 +388,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--group_name', default=None)
-    parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
+    parser.add_argument('--data_path', default='/mnt/aitrics_ext/ext01/kevin/dataset_en/LibriTTS_ss/preprocessed16/')
     parser.add_argument('--save_path', default='exp_default')
     parser.add_argument('--checkpoint_path', default='cp_default')
     parser.add_argument('--training_epochs', default=1, type=int)
@@ -407,6 +407,11 @@ def main():
     args.use_scaler = bool(args.use_scaler)
     args.freeze_ss = bool(args.freeze_ss)
     
+    #######
+    args.save_path = os.path.join("/mnt/aitrics_ext/ext01/eugene/Exp_results/", args.save_path)
+    args.checkpoint_path = os.path.join("/mnt/aitrics_ext/ext01/eugene/Exp_results/", args.checkpoint_path)
+    #######
+
     torch.backends.cudnn.enabled = True
 
     with open(args.config) as f:

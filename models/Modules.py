@@ -24,7 +24,7 @@ def get_sinusoid_encoding_table(n_position, d_hid, padding_idx=None):
         sinusoid_table[padding_idx] = 0.
     return torch.FloatTensor(sinusoid_table)
 
-
+'''
 class LearnableFourierPositionalEncoding(nn.Module):
     def __init__(self, G: int, M: int, F_dim: int, H_dim: int, D: int, gamma: float):
         """
@@ -80,7 +80,7 @@ class LearnableFourierPositionalEncoding(nn.Module):
         # Step 3. Reshape to x's shape
         PEx = Y.reshape((N, self.D))
         return PEx
-
+'''
 
 class Mish(nn.Module):
     def __init__(self):
