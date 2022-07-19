@@ -11,8 +11,8 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch.utils.data.distributed
 
-from models.Hifigan import MultiPeriodDiscriminator as MPD, MultiScaleDiscriminator as MSD, Generator_intpol
-from models.StyleSpeech import StyleSpeech
+from models.Hifigan import MultiPeriodDiscriminator_dwt as MPD, MultiScaleDiscriminator_dwt as MSD, Generator_intpol, Generator_intpol_conv
+from models.StyleSpeech import StyleSpeech, StyleSpeech_attn
 from models.Loss import StyleSpeechLoss as StyleSpeechLoss, CVCLoss
 from models.Optimizer import *
 
@@ -183,7 +183,7 @@ def train(rank, args, config, gpu_ids):
             loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, spec_crop, wav_output, wav_output_spec,
                                             loss_ss, mel_output, spec_target, 
                                             log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
-                                            scaler=None, retain_graph=False, G_only=False, lmel_hifi=config.lmel_hifi, lmel_ss=config.lmel_ss)
+                                            retain_graph=False, G_only=False, lmel_hifi=config.lmel_hifi, lmel_ss=config.lmel_ss)
             
             if rank == 0:
                 # STDOUT & log.txt logging

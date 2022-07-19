@@ -9,6 +9,9 @@ import librosa
 import tgt
 from preprocessors.utils import get_alignment
 
+# Comments: Aligner-related codes 
+# from aligner.utils import BetaBinomialInterpolator
+# beta_binomial_interpolator = BetaBinomialInterpolator()
 
 def parse_batch(batch):
     sid = torch.from_numpy(batch["sid"]).long().cuda()
@@ -23,13 +26,18 @@ def parse_batch(batch):
     spec_len = torch.from_numpy(batch["spec_len"]).long().cuda()
     max_src_len = np.max(batch["src_len"]).astype(np.int32)
     max_spec_len = np.max(batch["spec_len"]).astype(np.int32)
-    ##############################################################
     spec_start_idx = torch.Tensor(batch["spec_start_idx"]).int().cuda()
     wav = torch.from_numpy(np.array(batch["wav"], dtype=np.float32)).cuda()
-    ##############################################################
+    # ali_prior = batch["ali_prior"]
     return sid, text, mel_target, spec_target, spec_start_idx, wav, \
             D, log_D, f0, energy, \
             src_len, spec_len, max_src_len, max_spec_len
+    '''
+    return sid, text, mel_target, ali_prior, spec_target, spec_start_idx, wav, \
+            D, log_D, f0, energy, \
+            src_len, spec_len, max_src_len, max_spec_len
+    '''
+    
 
 
 def prepare_dataloader(data_path, filename, batch_size, shuffle=True, num_workers=2, meta_learning=False, seed=0, val=False):
@@ -62,7 +70,11 @@ def norm_mean_std(x, mean, std):
 class TextMelDataset(Dataset):
     def __init__(self, data_path, filename="train.txt", val=False):
         self.data_path = data_path
-        self.basename, self.text, self.sid = process_meta(data_path, os.path.join(data_path, filename))
+        # self.basename, self.text, self.sid = process_meta(data_path, os.path.join(data_path, filename))
+        if val is False:
+            self.basename, self.text, self.sid = process_meta(data_path, os.path.join(data_path, filename))
+        else:
+            self.basename, self.text, self.sid = process_meta(data_path, filename)
 
         self.sid_dict = self.create_speaker_table(self.sid)
 
@@ -80,7 +92,6 @@ class TextMelDataset(Dataset):
         self.create_sid_to_index()
         print('Speaker Num :{}'.format(len(self.sid_dict)))
 
-        #new
         self.val = val
     
     def create_speaker_table(self, sids):
@@ -98,7 +109,6 @@ class TextMelDataset(Dataset):
                 _sid_to_indexes[sid] = [i]
         self.sid_to_indexes = _sid_to_indexes
 
-    ############################################################
     def load_audio(self, sid, basename):
         tg_path = os.path.join(self.data_path, "TextGrid", str(sid), "{}.TextGrid".format(basename))
         textgrid = tgt.io.read_textgrid(tg_path)
@@ -108,7 +118,6 @@ class TextMelDataset(Dataset):
         wav, _ = librosa.load(wav_path, sr=self.sampling_rate)
         wav = wav[int(self.sampling_rate*start):int(self.sampling_rate*end)].astype(np.float32)
         return wav
-    #################################################################
 
     def __len__(self):
         return len(self.text)
@@ -118,7 +127,6 @@ class TextMelDataset(Dataset):
         sid = self.sid_dict[self.sid[idx]]
         phone = np.array(text_to_sequence(self.text[idx], []))
 
-        ##############################################################
         mel_path = os.path.join(
             self.data_path, "mel", "libritts-mel-{}.npy".format(basename))
         mel_target = np.load(mel_path)
@@ -142,7 +150,9 @@ class TextMelDataset(Dataset):
             spec_start_idx = np.random.randint(spec_target.shape[0] - self.num_melbins)
         if self.val == False:
             wav = wav[spec_start_idx * self.hop_length:(spec_start_idx + self.num_melbins) * self.hop_length]
-        ##############################################################
+        '''
+        align_prior_matrix = torch.from_numpy(beta_binomial_interpolator(spec_target.shape[0], phone.shape[0]))
+        '''
         
         D_path = os.path.join(
             self.data_path, "alignment", "libritts-ali-{}.npy".format(basename))
@@ -162,6 +172,7 @@ class TextMelDataset(Dataset):
                 "sid": sid,
                 "text": phone,
                 "mel_target": mel_target,
+                # "ali_prior": align_prior_matrix,
                 "spec_target": spec_target, # (melbin, 513) (* mel-spectrogram: (melbin, 80))
                 "spec_start_idx": spec_start_idx,
                 "wav": wav,
@@ -170,6 +181,14 @@ class TextMelDataset(Dataset):
                 "energy": energy}
                 
         return sample
+
+    '''
+    def pad_prior(self, x, max_spec, max_text):
+        # x: (spec_len, text_len)
+        spec_len, text_len = x.shape
+        m = torch.nn.ZeroPad2d((0, (max_spec - spec_len), 0, (max_text - spec_len)))
+        return m(x)
+    '''
 
     def reprocess(self, batch, cut_list):
         ids = [batch[ind]["id"] for ind in cut_list]
@@ -201,10 +220,16 @@ class TextMelDataset(Dataset):
         energies = pad_1D(energies)
         log_Ds = np.log(Ds + 1.)
 
+        '''
+        max_text = int(np.max(length_text))
+        max_spec = int(np.max(length_spec))
+        ali_prior = torch.stack([self.pad_prior(batch[ind]["ali_prior"], max_spec, max_text) for ind in cut_list], dim=0) # [B, max(spec_len), max(text_len)]
+        '''
         out = {"id": ids,
                "sid": np.array(sids),
                "text": texts,
                "mel_target": mel_targets,
+               # "ali_prior": ali_prior,
                "spec_target": spec_targets,
                "spec_start_idx": spec_start_idxes,
                "wav": wavs,
