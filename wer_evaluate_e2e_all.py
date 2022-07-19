@@ -48,8 +48,8 @@ def wer_eval(args, config=None):
     
     #####################################
     generator = Generator_intpol_conv(config).cuda()
-    # stylespeech = StyleSpeech_attn(config).cuda()
-    stylespeech = StyleSpeech(config).cuda()
+    stylespeech = StyleSpeech_attn(config).cuda()
+    # stylespeech = StyleSpeech_transformer(config).cuda()
     
     cp_ss = os.path.join(args.checkpoint_path, 'ss_{}'.format(args.checkpoint_step))
     cp_g = os.path.join(args.checkpoint_path, 'g_{}'.format(args.checkpoint_step))
@@ -104,6 +104,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', default='/mnt/aitrics_ext/ext01/kevin/dataset_en/LibriTTS_ss/preprocessed16/')
     parser.add_argument('--exp_code', default='default')
+    parser.add_argument('--min_step', default=1)
     parser.add_argument('--max_step', default=27)
     parser.add_argument('--val_type', default='val') # val or unseen
     
@@ -119,13 +120,14 @@ def main():
 
     best_iter = 0
     best_wer = 100
-    for i in range(0, int(args.max_step)):
+    assert int(args.min_step) <= int(args.max_step)
+    for i in range(int(args.min_step), int(args.max_step)+1):
         args.checkpoint_step = "00"
-        if i < 99:
+        if i < 100:
             args.checkpoint_step = "000"
-        if i < 9:
+        if i < 10:
             args.checkpoint_step = "0000"
-        args.checkpoint_step = args.checkpoint_step + str( (i+1) * 1000 )
+        args.checkpoint_step = args.checkpoint_step + str(i * 1000)
         temp = wer_eval(args, config)
         if temp < best_wer:
             best_wer = temp
