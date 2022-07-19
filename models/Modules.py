@@ -24,63 +24,6 @@ def get_sinusoid_encoding_table(n_position, d_hid, padding_idx=None):
         sinusoid_table[padding_idx] = 0.
     return torch.FloatTensor(sinusoid_table)
 
-'''
-class LearnableFourierPositionalEncoding(nn.Module):
-    def __init__(self, G: int, M: int, F_dim: int, H_dim: int, D: int, gamma: float):
-        """
-        https://github.com/willGuimont/learnable_fourier_positional_encoding 
-        Learnable Fourier Features from https://arxiv.org/pdf/2106.02795.pdf (Algorithm 1)
-        Implementation of Algorithm 1: Compute the Fourier feature positional encoding of a multi-dimensional position
-        Computes the positional encoding of a tensor of shape [N, G, M]
-        :param G: positional groups (positions in different groups are independent)
-        :param M: each point has a M-dimensional positional values
-        :param F_dim: depth of the Fourier feature dimension
-        :param H_dim: hidden layer dimension
-        :param D: positional encoding dimension
-        :param gamma: parameter to initialize Wr
-        """
-        super().__init__()
-        self.G = G
-        self.M = M
-        self.F_dim = F_dim
-        self.H_dim = H_dim
-        self.D = D
-        self.gamma = gamma
-
-        # Projection matrix on learned lines (used in eq. 2)
-        self.Wr = nn.Linear(self.M, self.F_dim // 2, bias=False)
-        # MLP (GeLU(F @ W1 + B1) @ W2 + B2 (eq. 6)
-        self.mlp = nn.Sequential(
-            nn.Linear(self.F_dim, self.H_dim, bias=True),
-            nn.GELU(),
-            nn.Linear(self.H_dim, self.D // self.G)
-        )
-
-        self.init_weights()
-
-    def init_weights(self):
-        nn.init.normal_(self.Wr.weight.data, mean=0, std=self.gamma ** -2)
-
-    def forward(self, x):
-        """
-        Produce positional encodings from x
-        :param x: tensor of shape [N, G, M] that represents N positions where each position is in the shape of [G, M],
-                  where G is the positional group and each group has M-dimensional positional values.
-                  Positions in different positional groups are independent
-        :return: positional encoding for X
-        """
-        N, G, M = x.shape
-        # Step 1. Compute Fourier features (eq. 2)
-        projected = self.Wr(x)
-        cosines = torch.cos(projected)
-        sines = torch.sin(projected)
-        F = 1 / np.sqrt(self.F_dim) * torch.cat([cosines, sines], dim=-1)
-        # Step 2. Compute projected Fourier features (eq. 6)
-        Y = self.mlp(F)
-        # Step 3. Reshape to x's shape
-        PEx = Y.reshape((N, self.D))
-        return PEx
-'''
 
 class Mish(nn.Module):
     def __init__(self):
@@ -168,6 +111,62 @@ class ConvNorm(nn.Module):
     def forward(self, input):
         out = self.conv(input)
         return out
+
+
+class MultiHeadAttention_nonSelf(nn.Module):
+    ''' Multi-Head Attention module '''
+    def __init__(self, n_head, d_text, d_style, d_k, d_v, dropout=0., spectral_norm=False):
+        super(MultiHeadAttention_nonSelf, self).__init__()
+
+        self.n_head = n_head
+        self.d_k = d_k
+        self.d_v = d_v
+
+        self.w_qs = nn.Linear(d_text, n_head * d_k)
+        self.w_ks = nn.Linear(d_style, n_head * d_k)
+        self.w_vs = nn.Linear(d_style, n_head * d_v)
+        
+        self.attention = ScaledDotProductAttention(temperature=np.power(d_text, 0.5), dropout=dropout)
+
+        self.fc = nn.Linear(n_head * d_v, d_text)
+        self.dropout = nn.Dropout(dropout)
+
+        if spectral_norm:
+            self.w_qs = nn.utils.spectral_norm(self.w_qs)
+            self.w_ks = nn.utils.spectral_norm(self.w_ks)
+            self.w_vs = nn.utils.spectral_norm(self.w_vs)
+            self.fc = nn.utils.spectral_norm(self.fc)
+
+    def forward(self, x, style, mask=None):
+        d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
+        sz_b, len_x, _ = x.size()
+
+        residual = x
+
+        q = self.w_qs(x).view(sz_b, len_x, n_head, d_k)
+        k = self.w_ks(style).view(sz_b, len_x, n_head, d_k)
+        v = self.w_vs(style).view(sz_b, len_x, n_head, d_v)
+        q = q.permute(2, 0, 1, 3).contiguous().view(-1,
+                                                    len_x, d_k)  # (n*b) x lq x dk
+        k = k.permute(2, 0, 1, 3).contiguous().view(-1,
+                                                    len_x, d_k)  # (n*b) x lk x dk
+        v = v.permute(2, 0, 1, 3).contiguous().view(-1,
+                                                    len_x, d_v)  # (n*b) x lv x dv
+
+        if mask is not None:
+            slf_mask = mask.repeat(n_head, 1, 1)  # (n*b) x .. x ..
+        else:
+            slf_mask = None
+        output, attn = self.attention(q, k, v, mask=slf_mask)
+
+        output = output.view(n_head, sz_b, len_x, d_v)
+        output = output.permute(1, 2, 0, 3).contiguous().view(
+                        sz_b, len_x, -1)  # b x lq x (n*dv)
+
+        output = self.fc(output)
+
+        output = self.dropout(output) + residual
+        return output, attn
 
 
 class MultiHeadAttention(nn.Module):

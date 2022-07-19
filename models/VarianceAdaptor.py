@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
-# from utils import get_mask_from_lengths, pad
 import utils
 from models.Modules import LinearNorm, ConvNorm, get_sinusoid_encoding_table
-# import utils_stylespeech as utils
+from aligner.aligner import AlignerModel
+from aligner.utils import binarize_attention_parallel
 
 class VarianceAdaptor(nn.Module):
     """ Variance Adaptor """
@@ -65,6 +65,87 @@ class VarianceAdaptor(nn.Module):
         # Phoneme-wise positional encoding
         output = output + pe
         return output, log_duration_prediction, pitch_prediction, energy_prediction, mel_len, mel_mask
+
+
+class VarianceAdaptor_ali(nn.Module):
+    """ Variance Adaptor """
+    def __init__(self, config):
+        super(VarianceAdaptor_ali, self).__init__()
+
+        self.hidden_dim = config.variance_predictor_filter_size
+        self.predictor_kernel_size = config.variance_predictor_kernel_size
+        self.embedding_kernel_size = config.variance_embedding_kernel_size
+        self.dropout = config.variance_dropout
+
+        # Duration
+        self.duration_predictor = VariancePredictor(self.hidden_dim, self.hidden_dim,
+                                                            self.predictor_kernel_size, dropout=self.dropout)
+        # Pitch
+        self.pitch_predictor = VariancePredictor(self.hidden_dim, self.hidden_dim, self.predictor_kernel_size, 
+                                                            dropout=self.dropout)
+        self.pitch_embedding = VarianceEmbedding(1, self.hidden_dim, self.embedding_kernel_size, self.dropout)
+        # Energy
+        self.energy_predictor = VariancePredictor(self.hidden_dim, self.hidden_dim, self.predictor_kernel_size, 
+                                                            dropout=self.dropout)
+        self.energy_embedding = VarianceEmbedding(1, self.hidden_dim, self.embedding_kernel_size, self.dropout)
+        # Phoneme
+        self.ln = nn.LayerNorm(self.hidden_dim)
+
+        # Length regulator
+        self.length_regulator = LengthRegulator(self.hidden_dim, config.max_seq_len)
+
+        # Learning Alignment
+        self.aligner = AlignerModel(n_mel_channels=513, n_text_channels=1)
+
+    def forward(self, x, src_seq, mel, src_mask, src_len=None, mel_len=None, mel_mask=None, 
+                        duration_target=None, pitch_target=None, energy_target=None, max_len=None, ali_prior=None):
+        # Duration
+        log_duration_prediction = self.duration_predictor(x.detach() + (x - x.detach()), src_mask)
+        
+        print(src_seq.shape)
+        #################################
+        # Trainig of unsupervised duration modeling
+        attn_soft, attn_logprob = self.aligner(
+            mel,
+            mel_len,
+            src_seq.unsqueeze(2).type(torch.float32), 
+            src_len,
+            src_mask.unsqueeze(-1),
+            ali_prior
+        )
+        attn_hard = binarize_attention_parallel(attn_soft, src_len, mel_len)
+        attn_hard_dur = attn_hard.sum(2)[:, 0, :]
+        attn_out = (attn_soft, attn_hard, attn_hard_dur, attn_logprob)
+        #################################
+
+        # Pitch & Energy 
+        pitch_prediction = self.pitch_predictor(x, src_mask) 
+        if pitch_target is not None:
+            pitch_embedding = self.pitch_embedding(pitch_target.unsqueeze(-1))
+        else:
+            pitch_embedding = self.pitch_embedding(pitch_prediction.unsqueeze(-1))
+
+        energy_prediction = self.energy_predictor(x, src_mask) 
+        if energy_target is not None:
+            energy_embedding = self.energy_embedding(energy_target.unsqueeze(-1))
+        else:
+            energy_embedding = self.energy_embedding(energy_prediction.unsqueeze(-1))
+
+        x = self.ln(x) + pitch_embedding + energy_embedding
+
+        # Length regulate
+        if duration_target is not None:
+            output, pe, mel_len = self.length_regulator(x, duration_target, max_len)
+            mel_mask = utils.get_mask_from_lengths(mel_len)
+        else:
+            duration_rounded = torch.clamp(torch.round(torch.exp(log_duration_prediction)-1.0), min=0)            
+            duration_rounded = duration_rounded.masked_fill(src_mask, 0).long()
+            output, pe, mel_len = self.length_regulator(x, duration_rounded)
+            mel_mask = utils.get_mask_from_lengths(mel_len)
+
+        # Phoneme-wise positional encoding
+        output = output + pe
+        return output, log_duration_prediction, pitch_prediction, energy_prediction, mel_len, mel_mask, attn_out
 
 
 class LengthRegulator(nn.Module):

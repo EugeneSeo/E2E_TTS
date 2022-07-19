@@ -91,8 +91,8 @@ class CVCLoss(nn.Module):
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
 
     def forward(self, wav_pred, wav_orig):
-        batch_size = wav_pred.shape[0]
-        dim = 32
+        batch_size, melbin_no, lin_dim = wav_orig.shape
+        dim = melbin_no
 
         # wav_pred = wav_pred.view(batch_size, -1, dim)
         # wav_orig = wav_orig.view(batch_size, -1, dim)
@@ -110,12 +110,12 @@ class CVCLoss(nn.Module):
         l_pos = l_pos.view(batch_size, 1) # (B, 1)
         
         # negativa samples: reshape features to batch size
-        melbin_no = wav_orig.shape[1]
         l_neg_curbin = torch.bmm(wav_pred, wav_orig.transpose(2, 1)) # (B, 32, 32)
 
         # diagonal entries are similarity between same features, and hence meaningless.
         # just fill the diagonal with very small number, which is exp(-10) and almost zero
-        diagonal = torch.eye(melbin_no, device=wav_pred.device, dtype=torch.bool)[None, :, :]
+        # diagonal = torch.eye(melbin_no, device=wav_pred.device, dtype=torch.bool)[None, :, :]
+        diagonal = torch.eye(lin_dim, device=wav_pred.device, dtype=torch.bool)[None, :, :]
         l_neg_curbin.masked_fill_(diagonal, -10.0)
         
         l_neg = l_neg_curbin.view(batch_size, -1)

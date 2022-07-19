@@ -7,7 +7,6 @@ import argparse
 import json
 import soundfile as sf
 import torch
-# from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch.utils.data.distributed
@@ -15,12 +14,9 @@ import torch.utils.data.distributed
 from models.Hifigan import MultiPeriodDiscriminator as MPD, MultiScaleDiscriminator as MSD, Generator_intpol
 from models.StyleSpeech import StyleSpeech
 from models.Loss import StyleSpeechLoss as StyleSpeechLoss, CVCLoss
-# from models.Optimizer import ScheduledOptim, D_step, G_step, SS_step
 from models.Optimizer import *
-# from models.Feature import *
 
 from dataloader_lin import prepare_dataloader, parse_batch
-from torch.cuda.amp import autocast, GradScaler
 import utils
 
 
@@ -60,11 +56,6 @@ def train(rank, args, config, gpu_ids):
     msd = MSD().cuda()
     loss_ss = StyleSpeechLoss()
     loss_cvc = CVCLoss()
-    # feature = PatchSampleF()
-    
-    if args.freeze_ss:
-        for param in stylespeech.parameters():
-            param.requires_grad = False
     
     num_param = utils.get_param_num(generator) + utils.get_param_num(stylespeech) \
                 + utils.get_param_num(msd) + utils.get_param_num(mpd)
@@ -88,22 +79,14 @@ def train(rank, args, config, gpu_ids):
     # Add cp_ss & loading code
     steps = 0
     if cp_g is None or (cp_do is None or cp_ss is None):
-    # if True:
         state_dict_do = None
-        # stylespeech.load_state_dict(torch.load("./cp_StyleSpeech/stylespeech.pth.tar")['model'])
-        # # state_dict_g = load_checkpoint("./cp_hifigan/g_02500000", device)
-        # # generator.load_state_dict(state_dict_g['generator'])
-        # state_dict_do_ = load_checkpoint("./cp_hifigan/do_02500000", device)
-        # mpd.load_state_dict(state_dict_do_['mpd'])
-        # msd.load_state_dict(state_dict_do_['msd'])
         last_epoch = -1
-
     else:
         load_checkpoint(cp_ss, stylespeech, "stylespeech", rank, args.distributed)
         load_checkpoint(cp_g, generator, "generator", rank, args.distributed)
         load_checkpoint(cp_do, mpd, "mpd", rank, args.distributed)
         load_checkpoint(cp_do, msd, "msd", rank, args.distributed)
-        
+
         state_dict_do = torch.load(cp_do, map_location='cuda:{}'.format(rank))
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
@@ -120,38 +103,21 @@ def train(rank, args, config, gpu_ids):
         msd_without_ddp = msd.module
 
     # Optimizers
-    if (args.optim_g == "G_only"):
-        optim_g = torch.optim.AdamW(generator.parameters(), config.lr_g, betas=[config.adam_b1, config.adam_b2])
-        optim_ss = torch.optim.Adam(stylespeech.parameters(), config.lr_ss, betas=config.betas, eps=config.eps)
-    else: # args.optim_g = "G_and_SS"
-        optim_g = torch.optim.AdamW(itertools.chain(generator.parameters(), stylespeech.parameters()), config.lr_g, betas=[config.adam_b1, config.adam_b2])
+    optim_g = torch.optim.AdamW(itertools.chain(generator.parameters(), stylespeech.parameters()), config.lr_g, betas=[config.adam_b1, config.adam_b2])
     optim_d = torch.optim.AdamW(itertools.chain(msd.parameters(), mpd.parameters()),
                                 config.lr_d, betas=[config.adam_b1, config.adam_b2])
-    # optim_d = torch.optim.AdamW(mpd.parameters(), config.lr_d, betas=[h.adam_b1, h.adam_b2])
     print("Optimizer and Loss Function Defined.")
 
     if state_dict_do is not None:
         optim_g.load_state_dict(state_dict_do['optim_g'])
         optim_d.load_state_dict(state_dict_do['optim_d'])
-        if (args.optim_g == "G_only"):
-            optim_ss.load_state_dict(state_dict_do['optim_ss'])
-    # else:
-    #     if (args.optim_g == "G_only"):
-    #         optim_g.load_state_dict(state_dict_do_['optim_g'])
-    #     optim_d.load_state_dict(state_dict_do_['optim_d'])
-
-    # h.lr_decay = 0.8
+    
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=config.lr_decay, last_epoch=last_epoch)
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=config.lr_decay, last_epoch=last_epoch)
-    if (args.optim_g == "G_only"):
-        scheduled_optim = ScheduledOptim(optim_ss, config.decoder_hidden, config.n_warm_up_step, steps)
     
     train_loader = prepare_dataloader(args.data_path, "train.txt", shuffle=True, batch_size=config.batch_size) 
     if rank == 0:        
         validation_loader = prepare_dataloader(args.data_path, "val.txt", shuffle=True, batch_size=1, val=True) 
-        # sw = SummaryWriter(os.path.join(args.save_path, 'logs'))
-        # Init logger
-        # log_path = os.path.join(args.save_path, 'log.txt')
         log_path = os.path.join(args.checkpoint_path, 'log.txt')
         with open(log_path, "a") as f_log:
             f_log.write("Dataset :{}\n Number of Parameters: {}\n".format(config.dataset, num_param))
@@ -167,12 +133,6 @@ def train(rank, args, config, gpu_ids):
     mpd.train()
     msd.train()
     # -------------------------------------------------------------- #
-
-    # AutoCast #
-    if args.use_scaler:
-        scaler = GradScaler()
-    else:
-        scaler = None
 
     for epoch in range(max(0, last_epoch), args.training_epochs):
         if rank == 0:
@@ -193,30 +153,21 @@ def train(rank, args, config, gpu_ids):
             # Forwards
             mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = stylespeech(
                     text, src_len, spec_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
-            # mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, _, hidden_output = stylespeech(
-            #         text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
             indices = [[mel_start_idx[i]+j for j in range(32)] for i in range(config.batch_size)]
             indices = torch.Tensor(indices).type(torch.int64)
-            # indices = torch.unsqueeze(indices, 2).expand(-1, -1, 256).cuda()
-            indices = torch.unsqueeze(indices, 2).expand(-1, -1, config.encoder_hidden).cuda()
+            indices_hidden = torch.unsqueeze(indices, 2).expand(-1, -1, config.encoder_hidden).cuda()
 
-            wav_output = generator(acoustic_adaptor_output, hidden_output, indices=indices)
-            # print("acoustic shape: ", acoustic_adaptor_output.shape)
-            # print("hidden shape: ", hidden_output[1].shape)
-            # wav_output = generator(hidden_output[1], hidden_output[2:], indices=indices)
-            # wav_output = generator(hidden_output[2], hidden_output[3:], indices=indices)
-            wav_output_mel = utils.lin_spectrogram(wav_output.squeeze(1), config.n_fft, config.sampling_rate, config.hop_size, config.win_size)
-            # print("wav_output_mel: ", wav_output_mel.shape)
+            wav_output = generator(acoustic_adaptor_output, hidden_output, indices=indices_hidden, mel_start_idx=mel_start_idx)
+            wav_output_spec = utils.lin_spectrogram(wav_output.squeeze(1), config.n_fft, config.sampling_rate, config.hop_size, config.win_size)
+            wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
+                                                        config.fmin, config.fmax_for_loss)
             wav_crop = torch.unsqueeze(wav, 1)
 
-            indices2 = [[mel_start_idx[i]+j for j in range(32)] for i in range(config.batch_size)]
-            indices2 = torch.Tensor(indices2).type(torch.int64)
-            indices2 = torch.unsqueeze(indices2, 2).expand(-1, -1, config.n_mel_channels).cuda()
+            indices_spec = torch.unsqueeze(indices, 2).expand(-1, -1, config.n_mel_channels).cuda()
+            indices_mel = torch.unsqueeze(indices, 2).expand(-1, -1, 80).cuda()
 
-            # mel_crop = torch.transpose(torch.gather(mel_target, 1, indices2), 1, 2)
-            mel_crop = torch.transpose(torch.gather(spec_target, 1, indices2), 1, 2)
-            # print("mel_crop: ", mel_crop.shape)
-            # mel_crop = torch.transpose(torch.gather(mel_output, 1, indices2), 1, 2)
+            spec_crop = torch.transpose(torch.gather(spec_target, 1, indices_spec), 1, 2)
+            mel_crop = torch.transpose(torch.gather(mel_target, 1, indices_mel), 1, 2)
 
             # Optimizing Step
             # GAN D step
@@ -229,52 +180,23 @@ def train(rank, args, config, gpu_ids):
             mpd.requires_grad_(False)
             msd.requires_grad_(False)
             generator.requires_grad_(True)
-            if (args.optim_g == "G_and_SS"):
-                loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
-                                                loss_ss, mel_output, spec_target, 
-                                                log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
-                                                scaler=scaler, retain_graph=False, G_only=False, lmel_hifi=config.lmel_hifi, lmel_ss=config.lmel_ss)
-                if scaler != None:
-                    scaler.update()
-            else: 
-                loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, mel_crop, wav_output, wav_output_mel, 
-                                                loss_ss, mel_output, spec_target, 
-                                                log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
-                                                scaler=scaler, retain_graph=True, G_only=True, lmel_hifi=config.lmel_hifi, lmel_ss=config.lmel_ss)
-                # StyleSpeech optimize
-                scheduled_optim.zero_grad()
-                loss_ss_all = SS_step(loss_ss, mel_output, spec_target, 
-                        log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len, scaler=scaler)
-                if scaler is None:
-                    torch.nn.utils.clip_grad_norm_(stylespeech.parameters(), config.grad_clip_thresh)
-                    scheduled_optim.step_and_update_lr(scaler=None)
-                else:
-                    scaler.unscale_(scheduled_optim._optimizer)
-                    torch.nn.utils.clip_grad_norm_(stylespeech.parameters(), config.grad_clip_thresh)
-                    # scheduled_optim.step_and_update_lr(scaler=None)
-                    scheduled_optim.step(scaler=scaler)
-                    scaler.update()
-                    scheduled_optim.update_lr()
-            cleanup()
-            return
+            loss_gen_all, loss_gen_list = G_step(mpd, msd, loss_cvc, optim_g, wav_crop, spec_crop, wav_output, wav_output_spec,
+                                            loss_ss, mel_output, spec_target, 
+                                            log_duration_output, log_D, f0_output, f0, energy_output, energy, src_len, mel_len,
+                                            scaler=None, retain_graph=False, G_only=False, lmel_hifi=config.lmel_hifi, lmel_ss=config.lmel_ss)
+            
             if rank == 0:
                 # STDOUT & log.txt logging
                 if steps % args.stdout_interval == 0:
                     with torch.no_grad():
-                        mel_error = F.l1_loss(mel_crop, wav_output_mel).item()
+                        mel_error = F.l1_loss(spec_crop, wav_output_spec).item()
 
-                    if (args.optim_g == "G_only"):
-                        str1 = 'Steps : {:d}, SS Loss Total : {:4.3f}, Gen Loss Total : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.format(
-                                    steps, loss_ss_all.item(), loss_gen_all, mel_error, time.time() - start_b)
-                    else:
-                        # str1 = 'Steps : {:d}, Gen Loss Total : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.format(
-                        #             steps, loss_gen_all, mel_error, time.time() - start_b)
-                        str1 = 'Steps: {:d}, G Loss: {:4.3f} ({:4.3f} + {:4.3f} + {:4.3f} + {:4.3f} + {:4.3f} + {:4.3f}), D Loss: {:4.3f} ({:4.3f} + {:4.3f} + {:4.3f} + {:4.3f})'.format(
-                                    steps, loss_gen_list[0], loss_gen_list[1], loss_gen_list[2],
-                                    loss_gen_list[3], loss_gen_list[4], loss_gen_list[5],
-                                    loss_gen_list[6], 
-                                    loss_disc_list[0], loss_disc_list[1], loss_disc_list[2], 
-                                    loss_disc_list[3], loss_disc_list[4])
+                    str1 = 'Steps: {:d}, G Loss: {:4.3f} ({:4.3f} + {:4.3f} + {:4.3f} + {:4.3f} + {:4.3f} + {:4.3f}), D Loss: {:4.3f} ({:4.3f} + {:4.3f} + {:4.3f} + {:4.3f})'.format(
+                                steps, loss_gen_list[0], loss_gen_list[1], loss_gen_list[2],
+                                loss_gen_list[3], loss_gen_list[4], loss_gen_list[5],
+                                loss_gen_list[6], 
+                                loss_disc_list[0], loss_disc_list[1], loss_disc_list[2], 
+                                loss_disc_list[3], loss_disc_list[4])
                     str2 = str1 + "\n"
                     with open(log_path, "a") as f_log:
                         f_log.write(str2)
@@ -293,18 +215,7 @@ def train(rank, args, config, gpu_ids):
                                      'msd': msd_without_ddp.state_dict(),
                                      'optim_g': optim_g.state_dict(), 'optim_d': optim_d.state_dict(), 
                                      'steps': steps, 'epoch': epoch}
-                    if (args.optim_g == "G_only"):
-                        save_dict['optim_ss'] = optim_ss.state_dict()
                     utils.save_checkpoint(checkpoint_path, save_dict)
-                    
-
-                # # Tensorboard summary logging
-                # if steps % args.summary_interval == 0:
-                #     print('Tensorboard summary logging')
-                #     if (args.optim_g == "G_only"):
-                #         sw.add_scalar("training/loss_ss_all", loss_ss_all, steps)
-                #     sw.add_scalar("training/gen_loss_total", loss_gen_all, steps)
-                #     sw.add_scalar("training/mel_spec_error", mel_error, steps)
 
                 # Validation
                 if steps % args.validation_interval == 0: # and steps != 0:
@@ -322,36 +233,22 @@ def train(rank, args, config, gpu_ids):
                             mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = stylespeech(
                                     text, src_len, spec_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
                             
-                            # wav_output = generator(torch.transpose(acoustic_adaptor_output.detach(), 1, 2), hidden_output)
                             wav_output = generator(acoustic_adaptor_output, hidden_output)
-                            # wav_output = generator(hidden_output[1], hidden_output[2:])
-                            # wav_output = generator(hidden_output[2], hidden_output[3:])
-                            # wav_output_mel = utils.lin_spectrogram(wav_output.squeeze(1), config.n_fft, config.sampling_rate, config.hop_size, config.win_size)
                             wav_output_mel = utils.mel_spectrogram(wav_output.squeeze(1), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
                                                         config.fmin, config.fmax_for_loss)
                             mel_crop = torch.transpose(mel_target, 1, 2)
                             spec_crop = torch.transpose(spec_target, 1, 2)
-                            # wav_crop = torch.unsqueeze(wav, 1)
                             
                             length = mel_len[0].item()
                             
-                            # lin_to_mel(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin, fmax, center=False)
-                            # mel_target = utils.lin_to_mel(mel_target[0, :length].transpose(0,1).unsqueeze(0), config.n_fft, config.n_mel_channels, config.sampling_rate, config.hop_size, config.win_size,
-                            #                             config.fmin, config.fmax_for_loss)
-                            # mel_target = mel_target.squeeze().detach().cpu()
-                            # print("line 341")
-                            print(mel_output[0].shape)
                             mel = utils.lin_to_mel(mel_output[0, :length].transpose(0,1).unsqueeze(0), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
                                                         config.fmin, config.fmax_for_loss)
                             mel = mel.squeeze().detach().cpu()
-                            # print("line 345")
                             wav_target_mel = utils.lin_to_mel(spec_crop[0].unsqueeze(0), config.n_fft, 80, config.sampling_rate, config.hop_size, config.win_size,
                                                         config.fmin, config.fmax_for_loss)
                             wav_target_mel = wav_target_mel.squeeze().detach().cpu()
                             
                             mel_target = mel_target[0, :length].detach().cpu().transpose(0, 1)
-                            # mel = mel_output[0, :length].detach().cpu().transpose(0, 1)
-                            # wav_target_mel = mel_crop[0].detach().cpu()
                             
                             wav_mel = wav_output_mel[0].detach().cpu()
                             # plotting
@@ -367,9 +264,6 @@ def train(rank, args, config, gpu_ids):
 
                     stylespeech.train()
                     generator.train()
-            
-            # cleanup()
-            # return
 
             steps += 1
 
@@ -387,30 +281,17 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--group_name', default=None)
     parser.add_argument('--data_path', default='/mnt/aitrics_ext/ext01/kevin/dataset_en/LibriTTS_ss/preprocessed16/')
-    parser.add_argument('--save_path', default='exp_default')
-    parser.add_argument('--checkpoint_path', default='cp_default')
+    parser.add_argument('--exp_code', default='default')
     parser.add_argument('--training_epochs', default=1, type=int)
     parser.add_argument('--stdout_interval', default=100, type=int)
     parser.add_argument('--checkpoint_interval', default=1000, type=int)
-    parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=1000, type=int)
-    
     parser.add_argument('--config', default='./configs/config_lin.json') # Configurations for StyleSpeech model
-    parser.add_argument('--optim_g', default='G_and_SS') # "G_and_SS" or "G_only"
-    parser.add_argument('--use_scaler', default=False)
-    parser.add_argument('--freeze_ss', default=False)
-
 
     args = parser.parse_args()
-    args.use_scaler = bool(args.use_scaler)
-    args.freeze_ss = bool(args.freeze_ss)
-    
-    #######
-    args.save_path = os.path.join("/mnt/aitrics_ext/ext01/eugene/Exp_results/", args.save_path)
-    args.checkpoint_path = os.path.join("/mnt/aitrics_ext/ext01/eugene/Exp_results/", args.checkpoint_path)
-    #######
+    args.save_path = os.path.join("/mnt/aitrics_ext/ext01/eugene/Exp_results/", "exp_{}".format(args.exp_code))
+    args.checkpoint_path = os.path.join("/mnt/aitrics_ext/ext01/eugene/Exp_results/", "cp_{}".format(args.exp_code))
 
     torch.backends.cudnn.enabled = True
 
@@ -421,7 +302,6 @@ def main():
     if not os.path.exists('{}/config.json'.format(args.checkpoint_path)):
         utils.build_env(args.config, 'config.json', args.checkpoint_path)
     
-    # ngpus = torch.cuda.device_count()
     gpu_ids = [0,1]
     ngpus = len(gpu_ids)
     args.ngpus = ngpus

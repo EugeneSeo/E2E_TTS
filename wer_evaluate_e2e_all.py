@@ -1,19 +1,17 @@
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 import torch
 from jiwer import wer
-########################################################
 import os
 import argparse
 import json
 import tgt
 import numpy as np
-# from dataloader import prepare_dataloader, parse_batch
 from dataloader_lin import prepare_dataloader, parse_batch
 
-from models.StyleSpeech import StyleSpeech
+from models.StyleSpeech import *
 from models.Hifigan import *
 import utils
-########################################################
+
 sampling_rate = 16000
 
 def get_alignment(tier):
@@ -40,7 +38,7 @@ def get_alignment(tier):
     return phones[:end_idx]
 
 def create_wav(SS, G, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len):
-    mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = SS(
+    mel_output, src_output, style_vector, log_duration_output, f0_output, energy_output, src_mask, mel_mask, _, acoustic_adaptor_output, hidden_output = SS( \
                 text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
     wav_output = G(acoustic_adaptor_output, hidden_output).squeeze(1)
     return wav_output
@@ -49,7 +47,8 @@ def wer_eval(args, config=None):
     eval_loader = prepare_dataloader(args.data_path, "{}.txt".format(args.val_type), shuffle=False, batch_size=1, val=True) 
     
     #####################################
-    generator = Generator_intpol4(config).cuda()
+    generator = Generator_intpol_conv(config).cuda()
+    # stylespeech = StyleSpeech_attn(config).cuda()
     stylespeech = StyleSpeech(config).cuda()
     
     cp_ss = os.path.join(args.checkpoint_path, 'ss_{}'.format(args.checkpoint_step))
@@ -68,18 +67,12 @@ def wer_eval(args, config=None):
     result = []
     for i, batch in enumerate(eval_loader):
         # parse batch
-        # sid, text, mel_target, mel_start_idx, wav, \
-        #             D, log_D, f0, energy, \
-        #             src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch)
         sid, text, mel_target, spec_target, mel_start_idx, wav, \
                     D, log_D, f0, energy, \
                     src_len, mel_len, max_src_len, max_mel_len = parse_batch(batch)
         
-        #####################################
         if (generator != None) and (stylespeech != None): 
-            # wav = create_wav(stylespeech, generator, text, src_len, mel_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
             wav = create_wav(stylespeech, generator, text, src_len, spec_target, mel_len, D, f0, energy, max_src_len, max_mel_len)
-        #####################################
 
         # get gt text
         basename = batch["id"][0]
@@ -100,38 +93,36 @@ def wer_eval(args, config=None):
     print(args.checkpoint_step, " - ", "WER:", np.average(result)*100)
     # WER: 4.9696267765553755 (gt)
     # WER: 6.233312314870909 (val.txt, no_finetuning)
-    # WER: 6.1237605380231284 (val.txt, finrtuning, 20220111_5, 00005000)
+    # WER: 6.1237605380231284 (val.txt, finetuning, 20220111_5, 00005000)
     # WER: 6.969311073233368 (unseen.txt, no_finetuning)
-    # WER: 6.448718703380852 (unseen.txt, finrtuning, 20220111_5, 00005000)
+    # WER: 6.448718703380852 (unseen.txt, finetuning, 20220111_5, 00005000)
     return np.average(result)*100
 
 def main():
     print('Initializing Training Process..')
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', default='/v9/dongchan/TTS/dataset/LibriTTS/preprocessed')
-    parser.add_argument('--checkpoint_path', default='cp_default')
-    # parser.add_argument('--checkpoint_step', default='00005000')
-    parser.add_argument('--max_step', default=79)
+    parser.add_argument('--data_path', default='/mnt/aitrics_ext/ext01/kevin/dataset_en/LibriTTS_ss/preprocessed16/')
+    parser.add_argument('--exp_code', default='default')
+    parser.add_argument('--max_step', default=27)
     parser.add_argument('--val_type', default='val') # val or unseen
-    parser.add_argument('--config', default='./hifi_gan/config_v1.json')
     
     args = parser.parse_args()
 
-    args.config = "./" + args.checkpoint_path + "/config.json"
+    args.checkpoint_path = os.path.join("/mnt/aitrics_ext/ext01/eugene/Exp_results/", "cp_{}".format(args.exp_code))
+    args.config = args.checkpoint_path + "/config.json"
+    
     with open(args.config) as f:
         data = f.read()
     config = json.loads(data)
     config = utils.AttrDict(config)
 
-    # gpu_ids = [0]
-    # h.num_gpus = len(gpu_ids)
-
-    # wer_eval(args, config)
     best_iter = 0
     best_wer = 100
-    for i in range(26, int(args.max_step)):
-        args.checkpoint_step = "000"
+    for i in range(0, int(args.max_step)):
+        args.checkpoint_step = "00"
+        if i < 99:
+            args.checkpoint_step = "000"
         if i < 9:
             args.checkpoint_step = "0000"
         args.checkpoint_step = args.checkpoint_step + str( (i+1) * 1000 )
