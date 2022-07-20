@@ -29,7 +29,7 @@ We are currently developing E2E-TTS StyleSpeech architecture.
             - `StyleSpeech_transformer`: Added multi-head attention of style attention and hidden state to the StyleSpeech's spectrogram decoder (Tranformer-like decoder).
             - `StyleSpeech_ali`: Alignment-learning StyleSpeech.
         - `models/Hifigan.py`
-            - `Generator_intpol`: Current best model with interpolation issue resolved. Originally, we divided hidden states before interpolation. However, since the nearby information is critical to waveform generation, we changed the order. The new issue is slow speed, due to a large amount of interpolating. 
+            - `Generator_intpol`: Current best model with interpolation issue resolved. Originally, we divided hidden states before interpolation. However, since the nearby information is critical to waveform generation, we changed the order.
             - `Generator_intpol_conv`: Current best model (HiFi-GAN + Hidden state interpolation).
             - `ConstantExpandFrame`: Interpolation frame s.t. copy & paste.
             - `ExpandFrame`: Gaussian interpolation frame which was used in EATS.

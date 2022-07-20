@@ -11,8 +11,8 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch.utils.data.distributed
 
-from models.Hifigan import MultiPeriodDiscriminator_dwt as MPD, MultiScaleDiscriminator_dwt as MSD, Generator_intpol, Generator_intpol_conv
-from models.StyleSpeech import StyleSpeech, StyleSpeech_attn
+from models.Hifigan import MultiPeriodDiscriminator_dwt as MPD, MultiScaleDiscriminator_dwt as MSD, Generator_intpol
+from models.StyleSpeech import StyleSpeech_attn
 from models.Loss import StyleSpeechLoss as StyleSpeechLoss, CVCLoss
 from models.Optimizer import *
 
@@ -51,7 +51,7 @@ def train(rank, args, config, gpu_ids):
 
     # Define model
     generator = Generator_intpol(config).cuda()
-    stylespeech = StyleSpeech(config).cuda()
+    stylespeech = StyleSpeech_attn(config).cuda()
     mpd = MPD().cuda()
     msd = MSD().cuda()
     loss_ss = StyleSpeechLoss()

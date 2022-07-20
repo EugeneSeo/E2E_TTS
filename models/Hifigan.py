@@ -190,7 +190,6 @@ class Generator_E2E(torch.nn.Module):
         remove_weight_norm(self.conv_post)
 
 # Current Best Model w/ Interpolation part changed (original: hidden state division -> interpolation, current: interpolation -> division)
-# Issues: SLOW SPEED!
 class Generator_intpol(torch.nn.Module):
     def __init__(self, h):
         super(Generator_intpol, self).__init__()
@@ -267,21 +266,14 @@ class Generator_intpol(torch.nn.Module):
             if (self.itp_start <= i <= self.itp_end): # interpolation indice
                 # position encoding
                 h = hidden[i - self.itp_start] + position_embedded
-                # if (indices != None): # train
-                #     h = torch.gather(h, 1, indices)
-
                 l = torch.tensor([[self.up_cum[i] for _ in range(max_len)] for _ in range(batch_size)], device=x.device)
-                h = self.expand_model(h, l)
                 
-                #################################################   
+                indices = None
                 if mel_start_idx != None: # train
                     indices = [[mel_start_idx[b]*self.up_cum[i]+j for j in range(32*self.up_cum[i])] for b in range(batch_size)]
-                    indices = torch.tensor(indices, device=x.device, dtype=torch.int64)
-                    indices = indices.unsqueeze(1).expand(-1, encoder_hidden, -1)
+                    indices = torch.tensor(indices, device=x.device, dtype=torch.int64).unsqueeze(1)
+                h = self.expand_model(h, l, indices=indices)
 
-                # if (indices != None): # train
-                    h = torch.gather(h, 2, indices)
-                #################################################   
                 h = self.ss_hidden[i - self.itp_start](h)
                 h = self.mish(h).transpose(1,2)
                 h = self.dropout(self.lns[i - self.itp_start](h)).transpose(1,2)            
@@ -442,13 +434,16 @@ class ExpandFrame(nn.Module):
         super(ExpandFrame, self).__init__()
         pass
 
-    def forward(self, hidden, duration):
+    def forward(self, hidden, duration, indices=None):
         t = torch.round(torch.sum(duration, dim=-1, keepdim=True, dtype=torch.float32)) #[B, 1]: (batch, total duration)
         e = torch.cumsum(duration, dim=-1).float() #[B, L]: (batch, cumulative summation of duration)
         c = e - 0.5 * torch.round(duration.type(torch.float32)) #[B, L]: token center positions
 
-        t = torch.arange(0, torch.max(t)) #[0, 1, 2, ..., max_length-1]
-        t = t.unsqueeze(0).unsqueeze(1) #[1, 1, T]
+        if indices != None:
+            t = indices #[B, 1, T]
+        else:
+            t = torch.arange(0, torch.max(t)) #[0, 1, 2, ..., max_length-1]
+            t = t.unsqueeze(0).unsqueeze(1) #[1, 1, T]
         c = c.unsqueeze(2) #[B, L, 1]
         
         t = t.to(hidden.device)
